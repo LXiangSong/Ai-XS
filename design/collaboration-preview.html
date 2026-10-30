@@ -63,7 +63,8 @@
 <dialog id="modal"><div id="modal-content"></div><div style="margin-top:16px"><button class="plain" onclick="closeModal()">关闭</button></div></dialog>
 <div id="toast" class="hidden" role="status"></div>
 <script>
-let paused=false,background=false,page='board',toastTimer,participantSequence=0;
+let paused=false,background=false,page='board',toastTimer,participantSequence=0,reassignmentTask=null;
+const pendingReassignments={};
 const $=id=>document.getElementById(id);
 function toast(text){$('toast').textContent=text;$('toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.add('hidden'),3800)}
 function openNav(){$('nav').classList.add('open');$('shade').classList.remove('hidden')}
@@ -113,7 +114,24 @@ function stopTransition(){const agent=$('return-agent').value;modal('<h2>中断�
 function finishStop(agent){$('independent-agent').textContent=agent;backToChat(false,false);toast('演示中断后的页面；未操作实际进程')}
 function backToChat(keep,readAgent=true){if(readAgent)$('independent-agent').textContent=$('return-agent').value;background=keep;closeModal();$('chat-background').classList.toggle('hidden',!keep);$('handoff').classList.remove('hidden');show('chat')}
 const tasks={plan:['明确问题与验收标准','Claude Code','已完成','交付：计划与验收标准。'],baseline:['记录项目基线与工作区','Codex','已完成','交付：基线记录。'],code:['实现日志分层与进度界面','Codex','运行中','独立工作区 · 重任务名额 1/1 · 示例活动：正在构建。'],prep:['准备边界用例与测试清单','DeepSeek','运行中','只读准备 · 等实现完成后，再核对实际补丁。'],review:['审核实际补丁与测试覆盖','DeepSeek','等待依赖','等待实现与测试准备完成；审核结果关联补丁版本。'],test:['合并修改并运行回归测试','Codex','等待依赖','等待实现、审核完成以及重任务名额可用。'],deliver:['汇总结果，提交验收','Claude Code','等待依赖','等待测试结果，不把未完成修改当作已交付成果。']};
-function task(id){const t=tasks[id];modal('<h2>'+t[0]+'</h2><p><span class="badge">'+t[2]+'</span>　'+t[1]+'</p><p>'+t[3]+'</p><p class="small muted">流程、子任务与尝试均有独立编号；日志和用量可回溯。</p>'+(t[2]==='运行中'?'<button class="outline" onclick="toast(\'正式版会发送真实中断并等待退出；原型不改变进程\')">停止子任务</button>':'')+'<button class="plain" onclick="toast(\'正式版在当前详情展开实时活动，不自动跳到运行日志\')">展开活动</button>')}
+function task(id){const t=tasks[id];modal('<h2>'+t[0]+'</h2><p><span class="badge">'+t[2]+'</span>　'+t[1]+'</p><p>'+t[3]+'</p><p class="small muted">流程、子任务与尝试均有独立编号；日志和用量可回溯。</p>'+(t[2]==='运行中'?'<button class="outline" onclick="toast(\'正式版会发送真实中断并等待退出；原型不改变进程\')">停止子任务</button>':'')+'<button class="outline" onclick="openReassignment(\''+id+'\')">更换执行者 / 模型</button><button class="plain" onclick="toast(\'正式版在当前详情展开实时活动，不自动跳到运行日志\')">展开活动</button>')}
+function openReassignment(id){
+ const t=tasks[id];if(!t)return;
+ reassignmentTask=id;
+ modal('<h2>更换执行者 / 模型</h2><p id="reassignment-current"></p><label for="reassign-agent">目标 Agent</label><select id="reassign-agent"><option>Codex</option><option>Claude Code</option><option>DeepSeek</option></select><label for="reassign-model">目标模型</label><input id="reassign-model" placeholder="填写示例模型；正式版按来源校验"><label for="reassign-source">API 来源</label><select id="reassign-source"><option>当前第三方 API 配置（示例）</option><option>官方 API 配置（示例，需配置）</option></select><label for="reassign-timing">生效方式</label><select id="reassign-timing"></select><label for="reassign-scope">影响范围</label><select id="reassign-scope"><option value="task">仅此任务</option><option value="future">此参与者尚未开始的任务（正式版列出清单）</option></select><p class="small muted">保留历史、成果和原用量。立即交接先中断并核查退出，旧审批作废；不保证恢复到中断前的工具指令。本原型不操作进程。</p><div class="row wrap"><button class="outline" onclick="cancelReassignment()">取消</button><button class="primary" onclick="previewReassignment()">预览交接</button></div>');
+ $('reassignment-current').textContent=t[0]+' · '+t[1]+' · '+t[2];
+ $('reassign-agent').value=t[1];
+ const modes=t[2]==='运行中'?[['after','后续任务生效；当前任务继续'],['interrupt','中断当前任务并交接']]:t[2]==='已完成'?[['after','仅修改后续任务'],['redo','改派重做；下游成果需重新核对']]:[['queued','排队任务改派，保留依赖']];
+ for(const [value,label] of modes){const option=document.createElement('option');option.value=value;option.textContent=label;$('reassign-timing').appendChild(option)}
+}
+function cancelReassignment(){reassignmentTask=null;closeModal();toast('未改变任何任务或配置')}
+function previewReassignment(){
+ const model=$('reassign-model').value.trim();if(!model){toast('请填写目标示例模型');return}
+ const target={taskId:reassignmentTask,agent:$('reassign-agent').value,model,source:$('reassign-source').value,timing:$('reassign-timing').value,scope:$('reassign-scope').value};
+ modal('<h2>交接预览（示例）</h2><p id="reassignment-summary"></p><p>交接包括需求、已完成项、未完成问题、工作区、产物版本和未确认操作。正式版校验目标配置，必要时等旧进程退出，再将新尝试排队。</p><p class="small muted">只记录演示选择，不代表实际任务已中断或切换；不向 API 发请求。</p><button id="apply-reassignment" class="primary">保存演示选择</button>');
+ $('reassignment-summary').textContent=tasks[target.taskId][0]+' → '+target.agent+' · '+target.model+' · '+target.source+'。'+{after:'后续生效',interrupt:'中断并交接',redo:'明确重做',queued:'排队改派'}[target.timing]+'；'+(target.scope==='task'?'仅此任务':'影响清单需在正式版核对');
+ $('apply-reassignment').onclick=()=>{pendingReassignments[target.taskId]=target;reassignmentTask=null;closeModal();toast('已保存演示选择；未操作实际任务')};
+}
 function settings(){modal('<h2>协作与资源管理</h2><p>默认 2 个执行任务，重任务同时 1 个。允许同一 Agent 的不同模型参与；能否同时执行取决于实例隔离能力。普通会话也计入总数。</p><label for="limit">并发上限</label><select id="limit"><option>1 · 顺序</option><option selected>2 · 默认</option><option>3 · 实验</option></select><p class="small muted">内存紧张时暂停新派发，运行任务由你选择是否中断。不会自动杀掉任务。原型不采集设备信息。</p><button class="primary" onclick="closeModal();toast(\'仅预览设置，尚未写入 App\')">完成</button>')}
 addParticipant('Codex','规划','示例模型 A');
 addParticipant('Codex','实现','示例模型 B');
