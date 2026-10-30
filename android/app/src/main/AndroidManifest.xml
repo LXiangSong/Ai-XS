@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <queries><package android:name="com.google.android.documentsui" /><package android:name="com.android.documentsui" /><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
-    <application android:label="Ai-XS" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@style/AppTheme" android:allowBackup="false" android:usesCleartextTraffic="true" android:supportsRtl="true">
+    <application android:name=".AiXsApplication" android:label="Ai-XS" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:theme="@style/AppTheme" android:allowBackup="false" android:usesCleartextTraffic="true" android:supportsRtl="true">
         <activity android:name=".NativeHomeActivity" android:exported="true" android:windowSoftInputMode="adjustNothing" android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>

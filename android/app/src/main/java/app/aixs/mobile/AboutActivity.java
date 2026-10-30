@@ -16,7 +16,7 @@ import org.json.*;
 public final class AboutActivity extends androidx.appcompat.app.AppCompatActivity {
   private final ExecutorService worker = Executors.newSingleThreadExecutor();
   private final Handler handler = new Handler(Looper.getMainLooper());
-  private Button check, download, install;
+  private Button check, download, install, viewLogs;
   private TextView result, notes, progress;
   private JSONObject release;
   private boolean checking, autoInstall, installing;
@@ -55,6 +55,9 @@ public final class AboutActivity extends androidx.appcompat.app.AppCompatActivit
     progress = NativeUi.body(this, ""); body.addView(progress);
     install = NativeUi.primaryButton(this, "安装已下载更新", this::install);
     install.setVisibility(android.view.View.GONE); body.addView(install);
+    viewLogs = NativeUi.textButton(this, "失败详情 · 查看运行日志", () -> startActivity(new Intent(this, RuntimeActivity.class)
+        .putExtra("page", "logs").putExtra("returnToCaller", true).putExtra("debug", true).putExtra("logSource", "app-update")));
+    viewLogs.setVisibility(android.view.View.GONE); body.addView(viewLogs);
     notes = NativeUi.body(this, ""); notes.setTextIsSelectable(true); body.addView(notes);
     if (saved != null) try { show(new JSONObject(saved.getString("release", "{}"))); } catch (Exception ignored) {}
     if (saved == null) try { show(RuntimeManager.json(new File(AppUpdater.folder(this), "check.json"))); } catch (Exception ignored) {}
@@ -77,14 +80,17 @@ public final class AboutActivity extends androidx.appcompat.app.AppCompatActivit
     checking = true; check.setEnabled(false); check.setText("正在检查…");
     this.previews.setEnabled(false);
     download.setVisibility(android.view.View.GONE); release = null;
-    result.setText("正在连接 GitHub Releases…"); notes.setText("");
+    result.setText("正在连接 GitHub Releases…"); notes.setText(""); viewLogs.setVisibility(android.view.View.GONE);
+    AppLogs.info(this, "app-update", "检查 GitHub 应用更新");
     worker.execute(() -> {
       try {
         JSONObject found = UpdateSources.app(AppUpdater.version(this), previews);
         RuntimeManager.write(new File(AppUpdater.folder(this), "check.json"), found.toString());
+        AppLogs.info(this, "app-update", found.optString("message"));
         runOnUiThread(() -> { if (!isDestroyed()) show(found); });
       } catch (Exception error) {
-        runOnUiThread(() -> { if (!isDestroyed()) result.setText("检查失败：" + NativeEngine.message(error) + "\n可稍后重试或打开 GitHub 发布页面。"); });
+        AppLogs.failure(this, "app-update", "", "检查应用更新失败", error);
+        runOnUiThread(() -> { if (!isDestroyed()) { result.setText("检查失败：" + Diagnostics.redact(this, NativeEngine.message(error)) + "\n详情请查看运行日志。"); viewLogs.setVisibility(android.view.View.VISIBLE); } });
       } finally {
         runOnUiThread(() -> {
           checking = false;
@@ -118,7 +124,7 @@ public final class AboutActivity extends androidx.appcompat.app.AppCompatActivit
     } catch (Exception error) {
       autoInstall = false;
       try { AppUpdater.state(this, "failed", NativeEngine.message(error)); } catch (Exception ignored) {}
-      NativeUi.error(this, "无法启动下载：" + NativeEngine.message(error));
+      updateFailure("无法启动下载", error);
     }
   }
   private void refreshDownload() {
@@ -128,7 +134,7 @@ public final class AboutActivity extends androidx.appcompat.app.AppCompatActivit
     download.setEnabled(!status.equals("downloading"));
     boolean ready = status.equals("ready") && AppUpdater.apk(this).isFile();
     install.setVisibility(ready ? android.view.View.VISIBLE : android.view.View.GONE);
-    if (status.equals("failed")) autoInstall = false;
+    if (status.equals("failed")) { autoInstall = false; viewLogs.setVisibility(android.view.View.VISIBLE); }
     if (ready && autoInstall && !installing && hasWindowFocus()) { autoInstall = false; install(); }
   }
   private void install() {
@@ -148,13 +154,19 @@ public final class AboutActivity extends androidx.appcompat.app.AppCompatActivit
             Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".updates", AppUpdater.apk(this));
             startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
-          } catch (Exception error) { NativeUi.error(this, "无法打开安装程序：" + NativeEngine.message(error)); }
+          } catch (Exception error) { updateFailure("无法打开安装程序", error); }
         });
       } catch (Exception error) {
+        AppLogs.failure(this, "app-update", "", "安装包验证失败", error);
         try { AppUpdater.state(this, "failed", NativeEngine.message(error)); } catch (Exception ignored) {}
-        runOnUiThread(() -> { installing = false; if (!isDestroyed()) { install.setEnabled(true); refreshDownload(); NativeUi.error(this, NativeEngine.message(error)); } });
+        runOnUiThread(() -> { installing = false; if (!isDestroyed()) { install.setEnabled(true); refreshDownload(); viewLogs.setVisibility(android.view.View.VISIBLE); } });
       }
     });
+  }
+  private void updateFailure(String message, Exception error) {
+    AppLogs.failure(this, "app-update", "", message, error);
+    progress.setText(message + "：" + Diagnostics.redact(this, NativeEngine.message(error)) + "\n详情请查看运行日志。");
+    viewLogs.setVisibility(android.view.View.VISIBLE);
   }
   @Override protected void onActivityResult(int request, int resultCode, Intent data) {
     super.onActivityResult(request, resultCode, data);

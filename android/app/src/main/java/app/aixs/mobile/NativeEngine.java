@@ -19,6 +19,7 @@ final class NativeEngine {
   private static final AtomicLong ids = new AtomicLong();
   private static final Handler main = new Handler(Looper.getMainLooper());
   private static final ExecutorService writes = Executors.newSingleThreadExecutor();
+  private static volatile Consumer<String> diagnostics = value -> {};
   private static volatile Process process;
   private static volatile BufferedWriter input;
   private static volatile CompletableFuture<Void> readiness = new CompletableFuture<>();
@@ -27,6 +28,7 @@ final class NativeEngine {
   }
   static void attach(Process child, Consumer<String> logger) {
     fail("Agent 服务已重新连接");
+    diagnostics = logger;
     process = child;
     readiness = new CompletableFuture<>();
     input = new BufferedWriter(new OutputStreamWriter(child.getOutputStream(), StandardCharsets.UTF_8));
@@ -102,6 +104,16 @@ final class NativeEngine {
     String id = Long.toString(ids.incrementAndGet());
     Process owner = process;
     pending.put(id, future);
+    long began = System.currentTimeMillis();
+    diagnostics.accept("RPC #" + id + " " + method + " 开始");
+    future.whenComplete((result, error) -> {
+      String detail = "RPC #" + id + " " + method + " · " + (System.currentTimeMillis() - began) + "ms · ";
+      if (error == null) diagnostics.accept(detail + "完成");
+      else {
+        StringWriter trace = new StringWriter(); error.printStackTrace(new PrintWriter(trace));
+        diagnostics.accept("[ERROR] " + detail + "失败：" + message(error) + "\n" + trace);
+      }
+    });
     main.postDelayed(() -> {
       if (pending.remove(id, future))
         future.completeExceptionally(new IOException("操作超时：" + method));

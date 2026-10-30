@@ -14,13 +14,20 @@ import org.json.JSONObject;
 
 /** Settings remain available before the shared runtime is initialized. */
 public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActivity {
-  private LinearLayout body;
+  private LinearLayout body, operationCard;
+  private TextView operationTitle, operationMessage;
+  private ProgressBar operationProgress;
+  private Button operationLogs;
+  private JSONObject pendingOperation;
+  private String logChannel = "normal", logSource = "all", logOperation = "";
+  private final java.util.Map<String, TextView> agentLabels = new java.util.HashMap<>();
+  private boolean exporting;
   private TextView summary, logs, logCount;
   private Button latestLogs;
   private final java.util.HashMap<String, LinearLayout> logChips = new java.util.HashMap<>();
   private ScrollView logScroll;
   private String rawLog = "";
-  private boolean logAuto = true, logFollowing = true, logTouch = false, logReading = false;
+  private boolean forceLogRead = true, logAuto = true, logFollowing = true, logTouch = false, logReading = false;
   private long logLength = -1, logModified = -1;
   private int pageGeneration;
   private String displayedLog = "";
@@ -48,12 +55,19 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     page = getIntent().getStringExtra("page");
     if (page == null)
       page = "settings";
+    logSource = getIntent().getStringExtra("logSource") == null ? "all" : getIntent().getStringExtra("logSource");
+    logChannel = getIntent().getBooleanExtra("debug", false) ? "debug" : "normal";
     if (state != null) {
       page = state.getString("page", "settings");
       selectedAgent = state.getString("agent");
+      logChannel = state.getString("logChannel", "normal");
+      logSource = state.getString("logSource", "all");
+      logOperation = state.getString("logOperation", "");
+      logFilter = state.getString("logFilter", "all");
+      logQuery = state.getString("logQuery", "");
       java.util.ArrayList<String> saved = state.getStringArrayList("history");
       if (saved != null) history.addAll(saved);
-    } else if (!page.equals("settings")) history.add("settings");
+    } else if (!page.equals("settings") && !getIntent().getBooleanExtra("returnToCaller", false)) history.add("settings");
     if (page.equals("api")) {
       page = "settings";
       history.clear();
@@ -90,6 +104,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   }
   private void render() {
     summary = null;
+    operationCard = null;
+    agentLabels.clear();
     logs = null;
     logScroll = null;
     logCount = null;
@@ -97,6 +113,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     logChips.clear();
     pageGeneration++;
     LinearLayout root = NativeUi.page(this, page.equals("logs") ? "运行日志" : "", this::back);
+    if (!page.equals("logs")) createOperationCard(root);
     if (page.equals("logs")) {
       body = Ui.col(this);
       body.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 16), Ui.dp(this, 8));
@@ -134,7 +151,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
         () -> show("device"));
     NativeUi.tile(this, body, R.drawable.ic_tools, "工具与扩展", "MCP 连接、GitHub 扩展与本地导入",
         () -> startActivity(new Intent(this, NativeToolsActivity.class).putExtra("engine", "codex")));
-    NativeUi.tile(this, body, R.drawable.ic_log, "运行日志", "环境安装与 Agent 服务输出", () -> show("logs"));
+    NativeUi.tile(this, body, R.drawable.ic_log, "运行日志", "普通事件、Debug 诊断与报告导出", this::openLogs);
 
     NativeUi.section(this, body, "维护");
     NativeUi.tile(this, body, R.drawable.ic_check, "检查 Agent 接口", "检查版本、模型与工具连接",
@@ -142,7 +159,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     NativeUi.tile(this, body, R.drawable.ic_stop, "停止 Agent 服务", busy() ? "当前可能有任务在运行" : "服务空闲",
         this::confirmStop);
     NativeUi.tile(this, body, R.drawable.ic_spark, "Agent 更新", "检查 Codex、Claude Code、DeepSeek 最新版本",
-        () -> { show("agents"); checkAgentUpdates(null); });
+        () -> checkAgentUpdates(null));
     NativeUi.tile(this, body, R.drawable.ic_check, "关于 Ai-XS", "版本信息、GitHub 项目与应用更新",
         () -> startActivity(new Intent(this, AboutActivity.class)));
 
@@ -171,7 +188,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     body.addView(NativeUi.primaryButton(this, ready ? "修复 / 补装组件" : "初始化环境",
         () -> operate("initialize", null)));
     NativeUi.tile(this, body, R.drawable.ic_check, "检查环境", "核对组件与版本", () -> operate("check", null));
-    NativeUi.tile(this, body, R.drawable.ic_log, "安装日志", "查看完整输出", () -> show("logs"));
+    NativeUi.tile(this, body, R.drawable.ic_log, "运行日志", "普通事件与 Debug 诊断", this::openLogs);
   }
 
   private void agentsPage() {
@@ -181,14 +198,17 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     primaryButton("检查全部 Agent 更新", () -> checkAgentUpdates(null));
 
     NativeUi.section(this, body, "Agent");
-    for (String id : new String[] {"codex", "claude", "deepseek"})
-      NativeUi.tile(this, body, R.drawable.ic_spark, agentName(id),
+    LinearLayout agents = Ui.group(body);
+    for (String id : new String[] {"codex", "claude", "deepseek"}) {
+      LinearLayout row = Ui.rowItem(agents, R.drawable.ic_spark, agentName(id),
           installed(id) ? manager.installed(id) + " · 点击管理" : "未安装 · 点击安装", () -> agentSheet(id));
+      agentLabels.put(id, (TextView) ((LinearLayout) row.getChildAt(1)).getChildAt(1));
+    }
 
     NativeUi.section(this, body, "诊断");
     NativeUi.tile(this, body, R.drawable.ic_check, "检查 Agent 接口", "版本、模型与工具连接",
         () -> operate("agent-check", null));
-    NativeUi.tile(this, body, R.drawable.ic_log, "安装日志", "查看完整输出", () -> show("logs"));
+    NativeUi.tile(this, body, R.drawable.ic_log, "运行日志", "普通事件与 Debug 诊断", this::openLogs);
   }
 
   private void devicePage() {
@@ -215,9 +235,35 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   }
 
   private void logsPage() {
-    summary = Ui.text(this, "", 11.5f, Ui.muted, null);
-    summary.setMaxLines(2);
-    body.addView(summary, new LinearLayout.LayoutParams(-1, -2));
+    LinearLayout modes = Ui.row(this);
+    for (String mode : new String[] {"normal", "debug", "legacy"}) {
+      String label = mode.equals("normal") ? "普通日志" : mode.equals("debug") ? "Debug" : "历史日志";
+      Button tab = logChannel.equals(mode) ? NativeUi.primaryButton(this, label, () -> changeLogChannel(mode))
+          : NativeUi.textButton(this, label, () -> changeLogChannel(mode));
+      modes.addView(tab, new LinearLayout.LayoutParams(0, -2, 1f));
+    }
+    body.addView(modes);
+    TextView hint = NativeUi.text(this, logChannel.equals("debug") ? "底层命令输出、错误堆栈与浏览器诊断 · 自动脱敏"
+        : logChannel.equals("normal") ? "操作阶段、完成结果与错误提醒" : "升级前保留的旧版输出", 12, NativeUi.MUTED);
+    body.addView(hint);
+    Spinner sources = new Spinner(this);
+    String[] sourceLabels = {"全部来源", "运行环境", "Agent 服务", "应用更新", "浏览器", "应用崩溃"};
+    String[] sourceValues = {"all", "runtime", "backend", "app-update", "browser", "app"};
+    sources.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, sourceLabels));
+    for (int i = 0; i < sourceValues.length; i++) if (sourceValues[i].equals(logSource)) sources.setSelection(i);
+    sources.setEnabled(!logChannel.equals("legacy"));
+    sources.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+      public void onNothingSelected(AdapterView<?> parent) {}
+      public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+        if (!logSource.equals(sourceValues[position])) { logSource = sourceValues[position]; renderLogs(); }
+      }
+    });
+    body.addView(sources);
+    if (!logOperation.isEmpty()) {
+      TextView logScope = NativeUi.text(this, "仅此操作 #" + logOperation, 12, NativeUi.ACCENT);
+      body.addView(logScope);
+      body.addView(NativeUi.textButton(this, "查看所有操作", () -> { logOperation = ""; render(); }));
+    }
 
     LinearLayout toolbar = Ui.group(body);
     LinearLayout followRow = Ui.row(this);
@@ -281,7 +327,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     box.setBackground(Ui.round(this, Ui.cardHigh, 14, 0.8f, Ui.lineSoft));
     box.setPadding(0, 0, 0, 0);
     logScroll = box;
-    box.setOnTouchListener((v, event) -> {
+    View.OnTouchListener logTouchListener = (v, event) -> {
       if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
         logTouch = true;
         if (box.canScrollVertically(-1) || box.canScrollVertically(1)) logFollowing = false;
@@ -289,7 +335,9 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
       } else if (event.getActionMasked() == android.view.MotionEvent.ACTION_UP
           || event.getActionMasked() == android.view.MotionEvent.ACTION_CANCEL) logTouch = false;
       return false;
-    });
+    };
+    box.setOnTouchListener(logTouchListener);
+    logs.setOnTouchListener(logTouchListener);
     LinearLayout.LayoutParams boxSpace = new LinearLayout.LayoutParams(-1, 0, 1f);
     boxSpace.leftMargin = Ui.dp(this, 12);
     boxSpace.rightMargin = Ui.dp(this, 12);
@@ -311,7 +359,24 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     });
     actions.addView(latestLogs, new LinearLayout.LayoutParams(0, -2, 1f));
     body.addView(actions);
+    body.addView(NativeUi.textButton(this, "导出诊断报告", this::exportLogs));
     renderLogs();
+  }
+
+  private String filteredLogs() {
+    return RuntimeLogText.filter(rawLog, logFilter, logQuery, logChannel.equals("legacy") ? "all" : logSource, logOperation);
+  }
+  private void changeLogChannel(String mode) {
+    if (logChannel.equals(mode)) return;
+    logChannel = mode;
+    if (mode.equals("legacy")) { logSource = "all"; logOperation = ""; }
+    resetLogSnapshot(); render();
+  }
+  private void exportLogs() {
+    if (exporting) { toast("正在导出，请稍候"); return; }
+    Intent pick = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+        .setType("text/plain").putExtra(Intent.EXTRA_TITLE, "Ai-XS-diagnostics-" + System.currentTimeMillis() + ".txt");
+    try { startActivityForResult(pick, 72); } catch (Exception error) { toast("无法打开文件保存页面"); }
   }
 
   private LinearLayout logChip(String label, String value) {
@@ -346,7 +411,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
 
   private void renderLogs() {
     if (logs == null) return;
-    String value = RuntimeLogText.filter(rawLog, logFilter, logQuery);
+    String value = filteredLogs();
     String shown = value.isEmpty() ? "没有匹配的日志" : value;
     if (!shown.contentEquals(logs.getText())) {
       if (!displayedLog.isEmpty() && value.startsWith(displayedLog) && logs.getText().toString().equals(displayedLog))
@@ -360,7 +425,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
 
   private void updateLogCount() {
     if (logCount == null) return;
-    boolean pending = !RuntimeLogText.filter(rawLog, logFilter, logQuery).equals(displayedLog);
+    boolean pending = !filteredLogs().equals(displayedLog);
     String state = !logAuto ? "刷新已暂停" : !logFollowing ? "正在查看历史" : "跟随最新";
     logCount.setText(state + " · 显示 " + RuntimeLogText.lines(displayedLog) + " 行 · 最近 64 KB"
         + (pending ? " · 有新日志" : ""));
@@ -378,11 +443,12 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   }
 
   private void readLogs() {
-    if (logs == null || !logAuto || logReading) return;
-    File log = new File(getFilesDir(), "runtime.log");
+    if (logs == null || (!logAuto && !forceLogRead) || logReading) return;
+    File log = logChannel.equals("legacy") ? new File(getFilesDir(), "runtime.log") : AppLogs.file(this, logChannel.equals("debug"));
     long length = log.length(), modified = log.lastModified();
     if (length == logLength && modified == logModified) return;
     logReading = true;
+    final boolean forced = forceLogRead; forceLogRead = false;
     final int generation = pageGeneration;
     logReader.execute(() -> {
       String content = null;
@@ -390,7 +456,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
       final String value = content;
       handler.post(() -> {
         logReading = false;
-        if (generation != pageGeneration || logs == null || !logAuto || isDestroyed()) return;
+        if (generation != pageGeneration || logs == null || (!logAuto && !forced) || isDestroyed()) return;
         if (value != null) {
           logLength = length;
           logModified = modified;
@@ -405,7 +471,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     android.content.ClipboardManager clipboard =
         (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
     if (clipboard == null) return;
-    CharSequence value = logs == null ? rawLog : logs.getText();
+    CharSequence value = Diagnostics.redact(this, displayedLog);
     clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Ai-XS", value));
     toast("日志已复制");
   }
@@ -450,15 +516,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   }
 
   private void browserLog() {
-    try {
-      new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-          .setTitle("浏览器日志")
-          .setMessage(Diagnostics.tail(this, "browser.log"))
-          .setPositiveButton("关闭", null)
-          .show();
-    } catch (Exception e) {
-      toast(e.getMessage());
-    }
+    logChannel = "debug"; logSource = "browser"; logOperation = "";
+    resetLogSnapshot(); show("logs");
   }
 
   private void confirmStop() {
@@ -515,9 +574,9 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
       agentDialogDismiss();
       pickPackage();
     });
-    Ui.rowItem(group, R.drawable.ic_log, "安装日志", "查看完整输出", () -> {
+    Ui.rowItem(group, R.drawable.ic_log, "运行日志", "普通事件与 Debug 诊断", () -> {
       agentDialogDismiss();
-      show("logs");
+      openLogs();
     });
     agentDialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                       .setTitle(agentName(id))
@@ -579,8 +638,12 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
           });
         });
       } catch (Exception error) {
+        AppLogs.failure(this, "runtime", "", "读取 Agent 版本失败", error);
         runOnUiThread(() -> {
-          if (!isDestroyed() && dialog.isShowing()) { content.removeAllViews(); content.addView(NativeUi.body(this, "读取失败：" + NativeEngine.message(error))); }
+          if (!isDestroyed() && dialog.isShowing()) {
+            content.removeAllViews(); content.addView(NativeUi.body(this, "读取失败：" + NativeEngine.message(error) + "\n详情请查看运行日志。"));
+            content.addView(NativeUi.textButton(this, "查看运行日志", () -> { dialog.dismiss(); logChannel = "debug"; logSource = "runtime"; logOperation = ""; resetLogSnapshot(); show("logs"); }));
+          }
         });
       }
     });
@@ -589,14 +652,14 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   private void versionOperation(String operation, String id, String release) {
     if (busy()) { toast("已有环境操作正在进行，请等待完成"); return; }
     try {
-      startForegroundService(new Intent(this, RuntimeService.class).putExtra("operation", operation).putExtra("agent", id).putExtra("release", release));
-      show("logs");
+      launchOperation(new Intent(this, RuntimeService.class).putExtra("operation", operation).putExtra("agent", id).putExtra("release", release));
     } catch (Exception error) { toast("无法启动版本操作：" + NativeEngine.message(error)); }
   }
 
   private void checkAgentUpdates(String only) {
     if (checkingAgents) { toast("正在检查 Agent 更新，请稍候"); return; }
     checkingAgents = true;
+    AppLogs.info(this, "runtime", "开始检查 Agent 官方更新");
     LinearLayout content = NativeUi.column(this);
     content.setPadding(dp(20), 0, dp(20), dp(12));
     TextView status = NativeUi.body(this, "正在连接官方发布源…"); content.addView(status);
@@ -612,7 +675,10 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
           if (!isDestroyed() && dialog.isShowing()) status.setText("正在检查 " + agentName(id) + " 官方发布版本…");
         });
         try { results.put(UpdateSources.agent(id)); }
-        catch (Exception error) { results.put(NativeUi.json("agent", id, "error", NativeEngine.message(error))); }
+        catch (Exception error) {
+          AppLogs.failure(this, "runtime", "", "检查 " + id + " 官方更新失败", error);
+          results.put(NativeUi.json("agent", id, "error", Diagnostics.redact(this, NativeEngine.message(error))));
+        }
       }
       runOnUiThread(() -> {
         checkingAgents = false;
@@ -623,9 +689,11 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
           String id = entry.optString("agent"), current = manager.installed(id), next = entry.optString("version");
           content.addView(NativeUi.text(this, agentName(id), 18, NativeUi.TEXT));
           if (entry.has("error")) {
-            content.addView(NativeUi.body(this, "检查失败：" + entry.optString("error")));
+            content.addView(NativeUi.body(this, "检查失败：" + entry.optString("error") + "\n详情请查看运行日志。"));
+            content.addView(NativeUi.textButton(this, "查看运行日志", () -> { dialog.dismiss(); logChannel = "debug"; logSource = "runtime"; logOperation = ""; resetLogSnapshot(); show("logs"); }));
             continue;
           }
+          AppLogs.info(this, "runtime", "检查 " + id + " 完成 · 当前 " + current + " · 官方 " + next);
           boolean missing = !installed(id);
           boolean newer;
           try { newer = missing || ReleaseVersions.compare(next, current) > 0; }
@@ -640,7 +708,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
             dialog.dismiss();
             Intent update = new Intent(this, RuntimeService.class).putExtra("operation", "agent-update")
                 .putExtra("agent", id).putExtra("version", next);
-            try { startForegroundService(update); show("logs"); }
+            try { launchOperation(update); }
             catch (Exception error) { toast("无法启动更新：" + NativeEngine.message(error)); }
           }));
         }
@@ -715,13 +783,12 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
         url.setError("请使用 GitHub Releases HTTPS 链接");
         return;
       }
-      startForegroundService(new Intent(this, RuntimeService.class)
+      launchOperation(new Intent(this, RuntimeService.class)
               .putExtra("operation", "import")
               .putExtra("agent", id)
               .putExtra("url", address)
               .putExtra("sha256", hash));
       dialog.dismiss();
-      show("logs");
     }));
     dialog.show();
   }
@@ -730,11 +797,79 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     if (agent != null)
       intent.putExtra("agent", agent);
     try {
-      startForegroundService(intent);
-      show("logs");
+      launchOperation(intent);
     } catch (Exception e) {
       toast("无法启动任务：" + e.getMessage());
     }
+  }
+  private void openLogs() {
+    logChannel = "normal"; logSource = "all"; logOperation = "";
+    resetLogSnapshot(); show("logs");
+  }
+  private void launchOperation(Intent intent) {
+    if (busy() || pendingOperation != null) { toast("已有操作正在进行，请等待完成"); return; }
+    String id = java.util.UUID.randomUUID().toString().substring(0, 8);
+    intent.putExtra("origin", page).putExtra("operationId", id);
+    try {
+      pendingOperation = OperationState.start(id, intent.getStringExtra("operation"), intent.getStringExtra("agent"),
+          page, "正在启动操作…", System.currentTimeMillis());
+      showOperation(pendingOperation);
+      startForegroundService(intent);
+    } catch (Exception error) {
+      AppLogs.failure(this, "runtime", id, "无法启动操作", error);
+      try { pendingOperation = OperationState.finish(pendingOperation, "failed", "无法启动操作：" + NativeEngine.message(error), System.currentTimeMillis()); }
+      catch (Exception ignored) {}
+      showOperation(pendingOperation);
+      try { RuntimeManager.write(new File(getFilesDir(), "runtime-operation.json"), pendingOperation.toString()); }
+      catch (Exception ignored) {}
+      pendingOperation = null;
+    }
+  }
+  private void createOperationCard(LinearLayout root) {
+    operationCard = Ui.col(this);
+    operationCard.setBackground(Ui.round(this, Ui.cardHigh, 16, 1, Ui.lineSoft));
+    Ui.pad(operationCard, 14, 10, 14, 8);
+    LinearLayout.LayoutParams space = new LinearLayout.LayoutParams(-1, -2);
+    space.setMargins(dp(16), dp(4), dp(16), dp(8));
+    root.addView(operationCard, space);
+    operationTitle = NativeUi.text(this, "", 14, NativeUi.TEXT); operationCard.addView(operationTitle);
+    operationMessage = NativeUi.text(this, "", 12, NativeUi.MUTED);
+    operationMessage.setMaxLines(5); operationMessage.setTextIsSelectable(true); operationCard.addView(operationMessage);
+    operationProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    operationProgress.setIndeterminate(true);
+    operationCard.addView(operationProgress, new LinearLayout.LayoutParams(-1, dp(6)));
+    operationLogs = NativeUi.textButton(this, "查看运行日志", () -> {}); operationCard.addView(operationLogs);
+    operationCard.setVisibility(View.GONE);
+  }
+  private void showOperation(JSONObject data) {
+    if (operationCard == null || data == null) return;
+    String status = data.optString("status");
+    boolean running = status.equals("running"), failed = status.equals("failed") || status.equals("interrupted");
+    if (status.isEmpty() || (!running && !data.optString("origin").equals(page))) {
+      operationCard.setVisibility(View.GONE); return;
+    }
+    operationCard.setVisibility(View.VISIBLE);
+    long end = running ? System.currentTimeMillis() : data.optLong("finishedAt", data.optLong("updatedAt"));
+    long seconds = Math.max(0, end - data.optLong("startedAt", end)) / 1000;
+    operationTitle.setText((running ? "进行中" : failed ? "操作失败" : "已完成") + " · "
+        + data.optString("title", "环境操作") + " · " + seconds + "s");
+    String detail = data.optString("message");
+    if (!running && !failed) {
+      org.json.JSONArray steps = data.optJSONArray("steps");
+      if (steps != null) for (int i = Math.max(0, steps.length() - 3); i < steps.length(); i++)
+        detail += "\n" + steps.optJSONObject(i).optString("message");
+    }
+    operationMessage.setText(detail + (failed ? "\n详情请查看运行日志，可按操作编号定位原因。" : ""));
+    operationProgress.setVisibility(running ? View.VISIBLE : View.GONE);
+    operationLogs.setVisibility(failed ? View.VISIBLE : View.GONE);
+    operationLogs.setOnClickListener(v -> {
+      logOperation = data.optString("id"); logChannel = "debug"; logSource = "all"; resetLogSnapshot(); show("logs");
+    });
+  }
+  private void resetLogSnapshot() {
+    forceLogRead = true;
+    pageGeneration++; logLength = -1; logModified = -1; rawLog = ""; displayedLog = "";
+    logFollowing = true; logTouch = false;
   }
   private void show(String name) {
     if (!page.equals(name)) history.add(page);
@@ -758,10 +893,16 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
       File status = new File(getFilesDir(), "runtime-operation.json");
       if (status.isFile()) {
         JSONObject data = RuntimeManager.json(status);
-        state += "\n" + data.optString("message") + (data.optString("status").equals("running") ? " · 进行中" : "");
+        if (pendingOperation != null && data.optString("id").equals(pendingOperation.optString("id"))) pendingOperation = null;
+        showOperation(pendingOperation == null ? data : pendingOperation);
       }
+      if (pendingOperation != null) showOperation(pendingOperation);
       if (summary != null && !state.contentEquals(summary.getText()))
         summary.setText(state);
+      for (java.util.Map.Entry<String, TextView> entry : agentLabels.entrySet()) {
+        String id = entry.getKey(), label = installed(id) ? manager.installed(id) + " · 点击管理" : "未安装 · 点击安装";
+        if (!label.contentEquals(entry.getValue().getText())) entry.getValue().setText(label);
+      }
       readLogs();
     } catch (Exception ignored) {
     }
@@ -769,16 +910,28 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   @Override
   protected void onActivityResult(int request, int result, Intent data) {
     super.onActivityResult(request, result, data);
+    if (request == 72 && result == RESULT_OK && data != null && data.getData() != null) {
+      final android.net.Uri uri = data.getData(); exporting = true;
+      logReader.execute(() -> {
+        try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+          if (out == null) throw new IOException("无法写入报告");
+          out.write(AppLogs.report(this).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+          runOnUiThread(() -> { if (!isDestroyed()) toast("诊断报告已导出，包含普通与 Debug 日志"); });
+        } catch (Exception error) {
+          AppLogs.failure(this, "runtime", "", "导出诊断报告失败", error);
+          runOnUiThread(() -> { if (!isDestroyed()) toast("导出失败：" + NativeEngine.message(error)); });
+        } finally { exporting = false; }
+      });
+    }
     if (request == 71 && result == RESULT_OK && data != null && data.getData() != null && selectedAgent != null) {
       try {
         getContentResolver().takePersistableUriPermission(data.getData(), Intent.FLAG_GRANT_READ_URI_PERMISSION);
       } catch (Exception ignored) {
       }
-      startForegroundService(new Intent(this, RuntimeService.class)
+      launchOperation(new Intent(this, RuntimeService.class)
               .putExtra("operation", "import")
               .putExtra("agent", selectedAgent)
               .putExtra("uri", data.getData().toString()));
-      show("logs");
     }
   }
   @Override
@@ -786,6 +939,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     super.onSaveInstanceState(state);
     state.putString("page", page);
     state.putString("agent", selectedAgent);
+    state.putString("logChannel", logChannel); state.putString("logSource", logSource);
+    state.putString("logOperation", logOperation); state.putString("logFilter", logFilter); state.putString("logQuery", logQuery);
     state.putStringArrayList("history", history);
   }
   @Override

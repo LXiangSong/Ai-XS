@@ -29,8 +29,11 @@ public final class AppUpdateService extends Service {
       try {
         wake.acquire(30 * 60 * 1000L);
         AppUpdater.state(this, "downloading", "正在连接 GitHub 下载更新…");
+        AppLogs.info(this, "app-update", "开始下载并校验应用更新");
         AppUpdater.download(this, new JSONObject(release));
+        AppLogs.info(this, "app-update", "更新包下载与签名校验完成，可安装");
       } catch (Exception error) {
+        AppLogs.failure(this, "app-update", "", "应用更新失败", error);
         try { AppUpdater.state(this, "failed", "更新失败：" + NativeEngine.message(error)); } catch (Exception ignored) {}
       } finally {
         if (wake.isHeld()) wake.release();

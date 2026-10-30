@@ -20,10 +20,14 @@ import org.json.JSONObject;
 public final class RuntimeManager {
   private final Context context;
   public final File runtime, root;
-  private final Consumer<String> logger;
+  private final Consumer<String> logger, debugLogger;
   public RuntimeManager(Context context, Consumer<String> logger) {
+    this(context, logger, logger);
+  }
+  public RuntimeManager(Context context, Consumer<String> logger, Consumer<String> debugLogger) {
     this.context = context.getApplicationContext();
     this.logger = logger;
+    this.debugLogger = debugLogger;
     runtime = new File(context.getFilesDir(), "runtime");
     root = new File(runtime, "rootfs");
   }
@@ -116,9 +120,12 @@ public final class RuntimeManager {
   public String run(List<String> command, boolean guest, int timeout) throws Exception {
     ProcessBuilder builder = guest ? process(command) : new ProcessBuilder(command);
     builder.redirectErrorStream(true);
+    long began = System.currentTimeMillis();
+    debugLogger.accept("启动子进程 · " + (guest ? "共享环境" : "Android") + " · 超时 " + timeout + "s");
     Process child = builder.start();
     ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
-    ScheduledFuture<?> expiry = timer.schedule(() -> child.destroyForcibly(), timeout, TimeUnit.SECONDS);
+    java.util.concurrent.atomic.AtomicBoolean timedOut = new java.util.concurrent.atomic.AtomicBoolean();
+    ScheduledFuture<?> expiry = timer.schedule(() -> { timedOut.set(true); child.destroyForcibly(); }, timeout, TimeUnit.SECONDS);
     StringBuilder tail = new StringBuilder();
     try (BufferedReader reader =
              new BufferedReader(new InputStreamReader(child.getInputStream(), StandardCharsets.UTF_8))) {
@@ -126,17 +133,25 @@ public final class RuntimeManager {
       while ((line = reader.readLine()) != null) {
         if (line.length() > 2000)
           line = line.substring(0, 2000);
-        log(line);
+        debugLogger.accept(line);
+        if (line.startsWith("AIXS_PROGRESS: ")) log(line.substring(15));
         tail.append(line).append('\n');
         if (tail.length() > 4000)
           tail.delete(0, tail.length() - 4000);
       }
+    } catch (IOException error) {
+      child.destroyForcibly();
+      if (timedOut.get()) throw new IOException("命令执行超时（" + timeout + " 秒）", error);
+      throw error;
     } finally {
       expiry.cancel(false);
       timer.shutdownNow();
     }
-    if (child.waitFor() != 0)
-      throw new IOException("命令未成功完成，请查看最后的安装日志");
+    int exit = child.waitFor();
+    debugLogger.accept("子进程结束 · exit=" + exit + " · 耗时 " + (System.currentTimeMillis() - began) + "ms");
+    if (timedOut.get()) throw new IOException("命令执行超时（" + timeout + " 秒）");
+    if (exit != 0)
+      throw new IOException("命令执行失败（退出码 " + exit + "），详情见 Debug 日志");
     return tail.toString();
   }
   public void initialize() throws Exception {
@@ -228,10 +243,12 @@ public final class RuntimeManager {
   public void check() throws Exception {
     if (!initialized())
       throw new IOException("请先在设置 → 运行环境中初始化");
-    run(guest("/bin/sh", "-ec",
-            "echo SHARED_RUNTIME_OK; uname -m; python3 --version; git --version; /opt/node/bin/node --version; "
-            + "/opt/node/bin/npm --version; du -sh /usr /opt /root /var 2>/dev/null"),
+    String result = run(guest("/bin/sh", "-ec",
+            "echo 'AIXS_PROGRESS: 检查 CPU 与 Python'; uname -m; python3 --version; "
+            + "echo 'AIXS_PROGRESS: 检查 Git 与 Node'; git --version; /opt/node/bin/node --version; "
+            + "echo 'AIXS_PROGRESS: 检查 npm'; /opt/node/bin/npm --version; echo SHARED_RUNTIME_OK"),
         true, 60);
+    log("共享环境检查通过\n" + result.trim());
   }
   public void deployTools() throws Exception {
     File tools = new File(root, "opt/aixs/tools");

@@ -7,7 +7,9 @@ import java.nio.charset.StandardCharsets;
 /** App-owned logs only. Never collect credentials or URL query strings. */
 final class Diagnostics {
   static String redact(String text) {
-    return text.replaceAll("(?i)(bearer\\s+|token=|api[_-]?key[=:]\\s*|sk-)[^\\s\"'&]+", "[已隐藏]");
+    return (text == null ? "" : text).replaceAll("(?i)(bearer\\s+|token=|api[_-]?key[=:]\\s*|sk-)[^\\s\"'&]+", "[已隐藏]")
+        .replaceAll("(?i)([\"']?(?:api[_-]?key|token|password|authorization)[\"']?\\s*[:=]\\s*[\"']?)[^\\s\"'&,}]+", "$1[已隐藏]")
+        .replaceAll("(?i)(https?://[^\\s?]+)\\?[^\\s]+", "$1?[已隐藏]");
   }
   static String redact(Context context, String text) {
     String safe = redact(text);
@@ -42,19 +44,11 @@ final class Diagnostics {
     return text;
   }
   static synchronized void record(Context context, String message) {
-    try {
-      File file = new File(context.getFilesDir(), "browser.log");
-      if (file.length() > 256 * 1024) {
-        File old = new File(context.getFilesDir(), "browser.previous.log");
-        old.delete();
-        file.renameTo(old);
-      }
-      try (FileOutputStream out = new FileOutputStream(file, true)) {
-        out.write(
-            (System.currentTimeMillis() + " " + redact(context, message) + "\n").getBytes(StandardCharsets.UTF_8));
-      }
-    } catch (IOException ignored) {
-    }
+    String lower = message.toLowerCase(java.util.Locale.ROOT);
+    String level = lower.contains("failure") || lower.contains("error") || lower.matches(".*http [45][0-9][0-9].*")
+        ? "ERROR" : lower.contains("warning") || lower.contains("warn") ? "WARN" : "DEBUG";
+    AppLogs.write(context, true, level, "browser", "", message);
+    if (level.equals("ERROR") || level.equals("WARN")) AppLogs.write(context, false, level, "browser", "", message);
   }
   static String tail(Context context, String name) throws IOException {
     File file = new File(context.getFilesDir(), name);

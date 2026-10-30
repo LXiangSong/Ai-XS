@@ -13,7 +13,7 @@ import org.json.JSONObject;
 public final class RuntimeService extends Service {
   private final ExecutorService jobs = Executors.newSingleThreadExecutor();
   private final AtomicBoolean busy = new AtomicBoolean(false);
-  private final Object logLock = new Object();
+  private JSONObject operation = new JSONObject();
   private RuntimeManager manager;
   private Process backend;
   private DeviceMcpServer device;
@@ -25,9 +25,9 @@ public final class RuntimeService extends Service {
     try {
       device.start();
     } catch (Exception e) {
-      log("手机工具启动失败：" + e.getMessage());
+      AppLogs.failure(this, "device", "", "手机工具启动失败", e);
     }
-    manager = new RuntimeManager(this, this::log);
+    manager = new RuntimeManager(this, this::log, this::debug);
     NotificationManager notifications = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
     notifications.createNotificationChannel(
         new NotificationChannel("runtime", "Ai-XS 运行环境", NotificationManager.IMPORTANCE_LOW));
@@ -45,38 +45,28 @@ public final class RuntimeService extends Service {
                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AiXS:RuntimeInstall");
     try {
       File state = new File(getFilesDir(), "runtime-operation.json");
-      if (state.isFile() && RuntimeManager.json(state).optString("status").equals("running"))
+      if (state.isFile() && RuntimeManager.json(state).optString("status").equals("running")) {
+        operation = RuntimeManager.json(state);
         state("interrupted", "上次操作被系统中断，可在设置中重试");
+        AppLogs.write(this, false, "WARN", "runtime", operation.optString("id"), "上次操作被系统中断");
+      }
     } catch (Exception ignored) {
     }
   }
-  private void state(String status, String message) {
+  private synchronized void state(String status, String message) {
     try {
-      RuntimeManager.write(new File(getFilesDir(), "runtime-operation.json"),
-          new JSONObject()
-              .put("status", status)
-              .put("message", message)
-              .put("updatedAt", System.currentTimeMillis())
-              .toString());
-    } catch (Exception ignored) {
-    }
+      operation = status.equals("running") ? OperationState.step(operation, Diagnostics.redact(this, message), System.currentTimeMillis())
+          : OperationState.finish(operation, status, Diagnostics.redact(this, message), System.currentTimeMillis());
+      RuntimeManager.write(new File(getFilesDir(), "runtime-operation.json"), operation.toString());
+    } catch (Exception ignored) {}
   }
   private void log(String value) {
-    String safe = Diagnostics.redact(this, value);
-    synchronized (logLock) {
-      try {
-        File log = new File(getFilesDir(), "runtime.log");
-        if (log.length() > 512 * 1024) {
-          File previous = new File(getFilesDir(), "runtime.previous.log");
-          previous.delete();
-          log.renameTo(previous);
-        }
-        try (FileOutputStream out = new FileOutputStream(log, true)) {
-          out.write((safe + "\n").getBytes(StandardCharsets.UTF_8));
-        }
-      } catch (IOException ignored) {
-      }
-    }
+    AppLogs.write(this, false, "INFO", "runtime", operation.optString("id"), value);
+    AppLogs.write(this, true, "INFO", "runtime", operation.optString("id"), value);
+    if (busy.get()) state("running", value);
+  }
+  private void debug(String value) {
+    AppLogs.write(this, true, "DEBUG", "runtime", operation.optString("id"), value);
   }
   @Override
   public int onStartCommand(Intent intent, int flags, int id) {
@@ -86,12 +76,19 @@ public final class RuntimeService extends Service {
     }
     String action = intent.getStringExtra("operation");
     if (!busy.compareAndSet(false, true)) {
-      log("已有环境操作正在进行，请等待完成。");
+      AppLogs.write(this, false, "WARN", "runtime", "", "已有环境操作正在进行，请等待完成。");
       return START_NOT_STICKY;
     }
-    state("running", label(action));
+    try {
+      String opId = intent.getStringExtra("operationId");
+      operation = OperationState.start(opId == null ? java.util.UUID.randomUUID().toString().substring(0, 8) : opId,
+          action, intent.getStringExtra("agent"), intent.getStringExtra("origin") == null ? "settings" : intent.getStringExtra("origin"),
+          label(action), System.currentTimeMillis());
+    } catch (Exception ignored) {}
+    log(label(action) + (intent.getStringExtra("agent") == null ? "" : " · " + intent.getStringExtra("agent")));
     jobs.execute(() -> {
       boolean restartAfterUpdate = false;
+      String failure = null;
       try {
         wake.acquire(30 * 60 * 1000L);
         boolean agentVersionOperation = "agent-update".equals(action) || "agent-select".equals(action) || "agent-remove".equals(action);
@@ -124,8 +121,10 @@ public final class RuntimeService extends Service {
           manager.check();
         else if ("device-check".equals(action))
           checkDeviceTools();
-        else if ("agent-check".equals(action))
+        else if ("agent-check".equals(action)) {
+          startBackend();
           manager.checkAgentInterfaces();
+        }
         else if ("agent".equals(action))
           manager.installAgent(intent.getStringExtra("agent"));
         else if ("agent-update".equals(action))
@@ -139,18 +138,21 @@ public final class RuntimeService extends Service {
           startBackend();
         else
           throw new IOException("未知操作");
-        state("completed", label(action) + "已完成");
+
       } catch (Exception error) {
-        log("操作失败：" + NativeEngine.message(error));
-        state("failed", NativeEngine.message(error));
+        failure = error instanceof IOException && error.getMessage() != null ? error.getMessage() : NativeEngine.message(error);
+        AppLogs.failure(this, "runtime", operation.optString("id"), "操作失败：" + failure, error);
       } finally {
         if (restartAfterUpdate) {
           try { startBackend(); log("Agent 更新操作结束，服务已恢复。"); }
           catch (Exception error) {
-            log("服务恢复失败：" + NativeEngine.message(error));
-            state("failed", "Agent 更新操作结束，但服务恢复失败，请重启服务：" + NativeEngine.message(error));
+            AppLogs.failure(this, "runtime", operation.optString("id"), "服务恢复失败", error);
+            failure = (failure == null ? "" : failure + "；") + "服务恢复失败，请重启服务：" + NativeEngine.message(error);
           }
         }
+        state(failure == null ? "completed" : "failed", failure == null ? label(action) + "已完成" : failure);
+        AppLogs.write(this, false, failure == null ? "INFO" : "ERROR", "runtime", operation.optString("id"),
+            operation.optString("message") + " · 耗时 " + (System.currentTimeMillis() - operation.optLong("startedAt")) + "ms");
         if (wake.isHeld())
           wake.release();
         busy.set(false);
@@ -191,7 +193,8 @@ public final class RuntimeService extends Service {
         continue;
       String rpcMethod = method.startsWith("phone_") || browser ? "tools/call" : method;
       if (method.startsWith("phone_") && PhoneAccessibilityService.active == null) {
-        log("无障碍未开启，跳过屏幕与截图检查");
+        AppLogs.write(this, false, "WARN", "runtime", operation.optString("id"), "无障碍未开启，跳过屏幕与截图检查");
+        state("running", "无障碍未开启，跳过屏幕与截图检查");
         continue;
       }
       JSONObject arguments = new JSONObject();
@@ -265,7 +268,11 @@ public final class RuntimeService extends Service {
     ProcessBuilder builder = manager.process(manager.guest(
         "/usr/bin/env", "AI_XS_STATE_DIR=/opt/aixs/native/.state", "python3", "/opt/aixs/native/native_host.py"));
     backend = builder.start();
-    NativeEngine.attach(backend, this::log);
+    NativeEngine.attach(backend, value -> {
+      boolean failed = value.startsWith("[ERROR]");
+      AppLogs.write(this, true, failed ? "ERROR" : "DEBUG", "backend", "", value);
+      if (failed) AppLogs.write(this, false, "ERROR", "backend", "", value.split("\n", 2)[0]);
+    });
     try {
       NativeEngine.awaitReady();
       if (!backend.isAlive())

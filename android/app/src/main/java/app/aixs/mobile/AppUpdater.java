@@ -18,7 +18,7 @@ final class AppUpdater {
     try { return RuntimeManager.json(stateFile(context)); } catch (Exception ignored) { return new JSONObject(); }
   }
   static void state(Context context, String status, String message) throws Exception {
-    RuntimeManager.write(stateFile(context), new JSONObject().put("status", status).put("message", message)
+    RuntimeManager.write(stateFile(context), new JSONObject().put("status", status).put("message", Diagnostics.redact(context, message))
         .put("fromVersion", version(context)).put("updatedAt", System.currentTimeMillis()).toString());
   }
   static String version(Context context) {

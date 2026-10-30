@@ -7,6 +7,33 @@ import java.nio.file.Files;
 import org.junit.Test;
 
 public class RuntimeLogTextTest {
+  private String event(String level, String source, String operation, String message) throws Exception {
+    return new org.json.JSONObject().put("time", 1720000000000L).put("level", level).put("source", source)
+        .put("operation", operation).put("version", "0.8.6-alpha").put("message", message) + "\n";
+  }
+  @Test public void structuredSeverityDoesNotGuessFromMessageKeywords() throws Exception {
+    String input = event("INFO", "runtime", "1", "errorCount: 0; failure checks passed")
+        + event("ERROR", "runtime", "1", "网络连接中断\n原因与堆栈")
+        + event("WARN", "browser", "", "页面响应缓慢");
+    String errors = RuntimeLogText.filter(input, "error", "");
+    assertFalse(errors.contains("errorCount"));
+    assertTrue(errors.contains("[ERROR] runtime · #1"));
+    assertTrue(errors.contains("原因与堆栈"));
+    assertFalse(errors.contains("页面响应缓慢"));
+    assertTrue(RuntimeLogText.filter(input, "warn", "").contains("页面响应缓慢"));
+  }
+  @Test public void correlatesOperationsAndSourcesWithoutLosingMultilineErrors() throws Exception {
+    String input = event("DEBUG", "runtime", "a12", "子进程输出")
+        + event("ERROR", "runtime", "b34", "失败\n  at call")
+        + event("ERROR", "browser", "", "页面失败") + "旧版失败\n";
+    String scoped = RuntimeLogText.filter(input, "all", "", "all", "b34");
+    assertTrue(scoped.contains("失败\n    at call"));
+    assertFalse(scoped.contains("子进程输出"));
+    assertFalse(scoped.contains("页面失败"));
+    assertFalse(scoped.contains("旧版失败"));
+    assertTrue(RuntimeLogText.filter(input, "error", "页面", "browser", "").contains("页面失败"));
+    assertEquals("", RuntimeLogText.filter(input, "all", "不匹配", "runtime", ""));
+  }
   @Test public void snapshotAlignsChineseLinesAndReadsRotation() throws Exception {
     File file = File.createTempFile("aixs-log", ".txt");
     try {
