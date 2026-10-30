@@ -18,9 +18,38 @@ public final class RuntimeService extends Service {
   private Process backend;
   private DeviceMcpServer device;
   private PowerManager.WakeLock wake;
+  private final Handler resourceHandler = new Handler(Looper.getMainLooper());
+  private final Runnable resourceSample = new Runnable() {
+    public void run() {
+      if (NativeEngine.ready()) {
+        ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+        ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(memory);
+        int thermal = Build.VERSION.SDK_INT >= 29 ? ((PowerManager) getSystemService(POWER_SERVICE)).getCurrentThermalStatus() : -1;
+        NativeEngine.call("native/collaboration/resources", NativeUi.json("available", memory.availMem,
+            "lowMemory", memory.lowMemory, "thermal", thermal), result -> {
+          org.json.JSONArray active=result.optJSONArray("activeAttemptIds");
+          if(active!=null) for(AskQueue.Pending pending:AskQueue.snapshot()) {
+            JSONObject execution=pending.ask.optJSONObject("execution");if(execution==null)continue;
+            String attempt=execution.optString("attemptId");boolean found=false;
+            for(int i=0;i<active.length();i++) if(attempt.equals(active.optString(i)))found=true;
+            if(!found)AskQueue.cancelExecution(attempt);
+          }
+          Intent screen=new Intent(RuntimeService.this,CollaborationActivity.class);
+          Notification n=new Notification.Builder(RuntimeService.this,"runtime").setSmallIcon(R.drawable.ic_launcher)
+              .setContentTitle("Ai-XS · 运行 "+result.optInt("running")+" / "+result.optInt("parallel",2))
+              .setContentText("待回答 "+AskQueue.snapshot().size()+" · 点击查看协作")
+              .setContentIntent(PendingIntent.getActivity(RuntimeService.this,7,screen,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE))
+              .setOngoing(true).build();
+          RuntimeService.this.startForeground(61,n);
+        }, error -> {});
+      }
+      resourceHandler.postDelayed(this, 5000);
+    }
+  };
   @Override
   public void onCreate() {
     super.onCreate();
+    resourceHandler.post(resourceSample);
     device = new DeviceMcpServer(this);
     try {
       device.start();
@@ -331,6 +360,7 @@ public final class RuntimeService extends Service {
   }
   @Override
   public void onDestroy() {
+    resourceHandler.removeCallbacks(resourceSample);
     if (device != null)
       device.close();
     if (backend != null)

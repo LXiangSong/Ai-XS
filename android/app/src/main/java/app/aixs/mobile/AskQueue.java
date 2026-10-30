@@ -59,6 +59,7 @@ final class AskQueue {
                                                                   : payload.optJSONArray("options"))
           .put("multiSelect", payload.optBoolean("multiSelect", false))
           .put("allowText", payload.optBoolean("allowText", true));
+      if (payload.optJSONObject("execution") != null) ask.put("execution", payload.getJSONObject("execution"));
       if (payload.optJSONArray("questions") != null) ask.put("questions", payload.optJSONArray("questions"));
     } catch (Exception ignored) {
     }
@@ -106,8 +107,22 @@ final class AskQueue {
     item.latch.countDown();
     return true;
   }
-  static void cancelAll() {
+  static void cancelExecution(String attemptId) {
     for (Pending item : snapshot()) {
+      JSONObject context=item.ask.optJSONObject("execution");
+      if (context!=null && attemptId.equals(context.optString("attemptId")))
+        answer(item.ask.optString("id"), NativeUi.json("answered", false, "reason", "执行实例已结束"));
+    }
+  }
+  static void cancelAll() {
+    cancel(false);
+  }
+  static void cancelOrdinary() {
+    cancel(true);
+  }
+  private static void cancel(boolean ordinaryOnly) {
+    for (Pending item : snapshot()) {
+      if (ordinaryOnly && item.ask.optJSONObject("execution") != null) continue;
       JSONObject cancelled = new JSONObject();
       try { cancelled.put("answered", false).put("reason", "用户停止了任务"); }
       catch (Exception ignored) {}

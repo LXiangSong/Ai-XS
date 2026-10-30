@@ -13,6 +13,7 @@
         <activity android:name=".NativeWorkspaceActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".NativeToolsActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ExtensionsActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".CollaborationActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity android:name=".AboutActivity" android:exported="false" />
         <activity android:name=".DeveloperBrowserActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <service android:name=".PhoneAccessibilityService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:label="Ai-XS 手机控制">

@@ -161,6 +161,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
         () -> show("agents"));
 
     NativeUi.section(this, body, "能力");
+    NativeUi.tile(this, body, R.drawable.ic_spark, "协作与资源管理", "并行上限、重任务与资源保护",
+        () -> startActivity(new Intent(this, CollaborationActivity.class).putExtra("page", "settings")));
     NativeUi.tile(this, body, R.drawable.ic_device, "手机与开发工具",
         PhoneAccessibilityService.active != null ? "无障碍已开启 · 页面调试可配置" : "无障碍未开启 · 页面调试可配置",
         () -> show("device"));

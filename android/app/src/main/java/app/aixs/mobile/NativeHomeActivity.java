@@ -197,6 +197,8 @@ implements NativeEngine.Observer {
         this.engine = prefs.getString("engine", "codex");
         this.cwd = prefs.getString("cwd", this.defaultWorkspace());
         this.threadId = prefs.getString("conversation-" + this.cwd.hashCode(), prefs.getString("thread-" + this.engine + "-" + this.cwd.hashCode(), ""));
+        String requestedConversation = getIntent().getStringExtra("conversationId");
+        if (requestedConversation != null && !requestedConversation.isEmpty()) this.threadId = requestedConversation;
         this.model = prefs.getString("model-" + this.engine, "");
         this.effort = prefs.getString("effort", "high");
         this.build();
@@ -300,7 +302,42 @@ implements NativeEngine.Observer {
         pillSpace.setMarginEnd(Ui.dp((Context)this, 2));
         this.topbar.addView((View)this.enginePill, pillSpace);
         this.engineLabel = (TextView)this.enginePill.getChildAt(this.enginePill.getChildCount() - 1);
+        TextView collaborationMode = Ui.text(this, "独立 ▾", 11.5f, Ui.muted, null);
+        collaborationMode.setPadding(Ui.dp(this, 7), Ui.dp(this, 8), Ui.dp(this, 7), Ui.dp(this, 8));
+        Ui.touchable(collaborationMode);
+        collaborationMode.setContentDescription("切换独立或协作模式");
+        collaborationMode.setOnClickListener(v -> this.openCollaboration());
+        this.topbar.addView(collaborationMode);
         this.topbar.addView(Ui.iconButton((Context)this, R.drawable.ic_add, "\u65b0\u5efa\u4f1a\u8bdd", this::newThread));
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);setIntent(intent);
+        String conversation = intent.getStringExtra("conversationId");
+        if (conversation != null && !conversation.isEmpty()) {
+            this.pendingThread = "";this.viewCache.forget(conversation);
+            if (NativeEngine.ready()) this.loadThread(conversation);
+            else {this.threadId=conversation;this.thread=null;this.resumed=false;this.persist();this.renderMessages(false);}
+        }
+    }
+
+    private boolean collaborationAfterTurn;
+    private void openCollaboration() {
+        if (!NativeEngine.ready()) { this.startService(); return; }
+        if (!this.turnId.isEmpty() || this.submitting) {
+            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("进入协作")
+                .setItems(new String[]{"当前任务完成后进入", "停止当前任务后进入"}, (d, which) -> {
+                    this.collaborationAfterTurn = true;
+                    if (which == 1) this.interrupt();
+                    else NativeUi.toast(this, "已安排完成后进入协作，再次点击可取消");
+                }).setNegativeButton("取消等待", (d,w) -> this.collaborationAfterTurn=false).show();
+            return;
+        }
+        Runnable open = () -> startActivity(new Intent(this, CollaborationActivity.class)
+            .putExtra("conversationId", this.threadId).putExtra("cwd", this.cwd));
+        if (this.threadId.isEmpty()) this.call("thread/start", NativeUi.json("cwd", this.cwd, "model", this.model), r -> {
+            this.thread=r.optJSONObject("thread");this.threadId=this.thread.optString("id");this.persist();open.run();
+        }); else open.run();
     }
 
     private int composerWidth() {
@@ -1083,6 +1120,10 @@ implements NativeEngine.Observer {
         footer.setPadding(Ui.dp((Context)this, 12), Ui.dp((Context)this, 8), Ui.dp((Context)this, 12), Ui.dp((Context)this, 12));
         footer.addView(Ui.divider((Context)this, 12));
         Ui.gap(footer, 6);
+        footer.addView(this.drawerRow(R.drawable.ic_spark, "协作", false, () -> {
+            this.drawer.closeDrawers();
+            this.startActivity(new Intent(this, CollaborationActivity.class));
+        }, false));
         footer.addView(this.drawerRow(R.drawable.ic_tools, "工具与扩展", false, () -> {
             this.drawer.closeDrawers();
             this.startActivity(new Intent((Context)this, NativeToolsActivity.class).putExtra("engine", this.engine));
@@ -2097,6 +2138,7 @@ implements NativeEngine.Observer {
             this.normalizeEffort();
             this.call("turn/start", NativeUi.json("threadId", this.threadId, "input", input, "model", this.model, "effort", this.effort, "clientUserMessageId", UUID.randomUUID().toString()), r -> {
             this.submitting = false;
+            if (r.optBoolean("queued")) NativeUi.toast(this, r.optString("message", "任务已排队"));
             if (r.optBoolean("handoffClipped")) NativeUi.toast(this, "较长历史已节选交接，完整记录保留供 Agent 读取");
             this.composer.setText("");
             this.attachments.clear();
@@ -2137,7 +2179,7 @@ implements NativeEngine.Observer {
         this.stoppingTurn = target;
         this.updateStatusLine();
         NativeEngine.call("native/chat/turn/interrupt", NativeUi.json("engine", this.engine, "threadId", owner, "turnId", target), r -> {
-            AskQueue.cancelAll();
+            AskQueue.cancelOrdinary();
             this.askHost.removeAllViews();
             this.pollStopped(owner, target, 0);
         }, error -> {
@@ -2257,6 +2299,7 @@ implements NativeEngine.Observer {
 
     @Override
     public void event(JSONObject event) {
+        if (event.has("workflowId")) return;
         block29: {
             String type = event.optString("type");
             if ("native/threadsChanged".equals(event.optString("method"))) {
@@ -2318,6 +2361,7 @@ implements NativeEngine.Observer {
                     JSONObject t2 = p.getJSONObject("turn");
                     if (p.has("progress")) t2.put("progress", p.optJSONObject("progress"));
                     this.putTurn(t2);
+                    this.loadThread(this.threadId);
                     this.turnId = t2.getString("id");
                     this.turnStartedAt = SystemClock.elapsedRealtime();
                     this.startTurnClock();
@@ -2337,6 +2381,7 @@ implements NativeEngine.Observer {
                     this.renderMessages(false);
                     this.loadThread(this.threadId);
                     this.refreshUsage(finished);
+                    if (this.collaborationAfterTurn) { this.collaborationAfterTurn=false;this.handler.postDelayed(this::openCollaboration, 500); }
                     return;
                 }
                 if (method.equals("item/started") || method.equals("item/completed")) {
@@ -3989,6 +4034,7 @@ implements NativeEngine.Observer {
     }
 
     private void renderAsk(JSONObject ask) {
+        if (ask.has("execution")) return;
         if (!ask.optBoolean("resolved") && ask.optJSONArray("questions") != null) {
             this.renderQuestion(null, ask.optString("id"), new Questionnaire(ask.optJSONArray("questions")), 0);
         } else this.renderAsk(ask, null);

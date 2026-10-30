@@ -12,6 +12,7 @@ import time
 import agent_core as core
 from shared_conversations import SharedConversations
 from extension_manager import ExtensionManager
+from collaboration_service import CollaborationService
 
 
 class NativeHost:
@@ -39,6 +40,7 @@ class NativeHost:
                 except Exception as error:
                     print('共享会话记录失败：'+str(error),file=sys.stderr,flush=True)
                     event=self.chats.translate(event)
+            if getattr(self,'collaboration',None):self.collaboration.normal_event(event)
             self.write({'event':event})
         core.APP._emit=emit
         core.APP.local_tools.emit=emit
@@ -56,10 +58,12 @@ class NativeHost:
         self.chats=SharedConversations(core.STATE/'conversations',core.api_route,
             self.read_thread,self.read_usage,core.PERMISSIONS.mode)
         core.ENGINES.boot()
+        self.collaboration=CollaborationService(core.STATE/'collaboration',self.chats,core.PROVIDERS,core.MCP,
+            self.extensions,core.ENGINES,lambda event:self.write({'event':event}),self.external_tasks)
         self.maintenance=False
         self.maintenance_lock=threading.RLock()
         self.starting_tasks=0
-        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.8.8-alpha'})
+        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.9.0-alpha'})
 
     def dispatch(self, request, slot=None):
         ident=request.get('id')
@@ -72,11 +76,17 @@ class NativeHost:
                     if self.maintenance:raise ValueError('正在更新 Agent，请等待完成后再发送任务')
                     self.starting_tasks+=1;starting=True
             if method=='native/maintenance/prepare':
-                with self.maintenance_lock,self.chats.lock:
-                    if self.starting_tasks or self.chats.busy or core.APP.active_turns or core.CLAUDE.runs or core.DEEPSEEK.runs:
+                with self.maintenance_lock,self.collaboration.lock,self.chats.lock:
+                    if self.starting_tasks or self.chats.busy or core.APP.active_turns or core.CLAUDE.runs or core.DEEPSEEK.runs or self.collaboration.active():
                         raise ValueError('仍有 Agent 任务在运行，请先结束任务再更新')
+                    self.collaboration.scheduler.closed=True
                     self.maintenance=True
                 result={'ready':True}
+            elif method.startswith('native/collaboration/'):
+                with self.maintenance_lock:
+                    if self.maintenance and method.rsplit('/',1)[-1] not in ('read','list','resources','pause','cancel','stop','respond'):
+                        raise ValueError('正在维护 Agent，请稍后重试')
+                    result=self.collaboration.handle(method.removeprefix('native/collaboration/'),params)
             elif method=='native/agents/status':
                 result=core.ENGINES.status(probe=False)
             elif method=='native/agents/control':
@@ -97,6 +107,8 @@ class NativeHost:
                 if action.startswith('permissions/'):
                     result=self.chats.permissions(action,params) if params.get('threadId') else core.api_route('native/'+action,params)
                 elif action=='usage/read':result=self.chats.usage(params)
+                elif action in ('turn/start','turn/edit'):result=self.collaboration.normal_submit(action,params)
+                elif action=='turn/interrupt' and self.collaboration.normal_cancel(params):result={}
                 else:result=self.chats.handle(action,params)
             elif method=='native/check':
                 result=self.check()
@@ -116,6 +128,13 @@ class NativeHost:
             elif method=='native/status':
                 result={'name':'Ai-XS','transport':'private-stdio','eventCursor':core.APP.event_id,
                     'approvals':[self.chats.translate(value) for value in core.APP.approvals.values()]}
+            elif method in ('turn/start','turn/edit'):
+                # Legacy adapter clients cannot bypass admission while shared
+                # collaboration workers hold execution or project resources.
+                with self.collaboration.lock:
+                    if self.collaboration.active() or self.collaboration.scheduler.leases:
+                        raise ValueError('协作正在使用执行资源，请通过共享会话入口提交任务并排队')
+                    result=core.api_route(method,params)
             else:
                 result=core.api_route(method,params)
             self.write({'id':ident,'result':result})
@@ -142,6 +161,12 @@ class NativeHost:
         with self.maintenance_lock:
             if self.maintenance:raise ValueError('正在维护 Agent，请稍后重试')
             if self.starting_tasks:raise ValueError('正在提交任务，请稍后重试启停操作')
+            if action=='stop':
+                with self.collaboration.lock:self.collaboration.stop_engine(None if target=='all' else target)
+                deadline=time.monotonic()+35
+                while self.collaboration.active(None if target=='all' else target):
+                    if time.monotonic()>deadline:raise ValueError('协作执行尚未确认退出，请查看协作任务，暂不停止共享服务')
+                    time.sleep(.1)
             for engine in dict.fromkeys(requested):
                 try:
                     job=core.ENGINES.action(engine,action,confirmed=params.get('confirmed') is True)['job']
@@ -155,6 +180,12 @@ class NativeHost:
                 except Exception as error:
                     results.append({'agent':engine,'status':'failed','message':str(error)})
         return {'data':results,'ok':all(r['status']=='completed' for r in results)}
+
+    def external_tasks(self):
+        with self.chats.lock:
+            docs=[self.chats._load(key) for key,row in list(self.chats.index.items()) if not row.get('deleted')]
+            docs=[d for d in docs if any(t.get('status')=='inProgress' and not t.get('queued') for t in d['turns']) and d['id'] not in getattr(getattr(self,'collaboration',None),'normal_active',set())]
+            return {'count':len(docs),'projects':[d['cwd'] for d in docs]}
 
     def read_usage(self, params):
         if core.engine_for(params)=='codex':
@@ -304,7 +335,7 @@ class NativeHost:
                     if len(raw)>24*1024*1024:raise ValueError('请求过大')
                     request=json.loads(raw)
                     if not isinstance(request,dict) or 'id' not in request:raise ValueError('请求缺少标识')
-                    control=request.get('method') in ('native/chat/turn/interrupt','native/chat/turn/status','turn/interrupt','approvals/respond','command/exec/terminate')
+                    control=request.get('method') in ('native/collaboration/stop','native/collaboration/pause','native/collaboration/cancel','native/collaboration/respond','native/collaboration/resources','native/chat/turn/interrupt','native/chat/turn/status','turn/interrupt','approvals/respond','command/exec/terminate')
                     slots=self.control_slots if control else self.slots
                     pool=self.controls if control else self.pool
                     if not slots.acquire(blocking=False):
@@ -312,6 +343,7 @@ class NativeHost:
                     pool.submit(self.dispatch,request,slots)
                 except (ValueError,TypeError) as error:self.write({'id':None,'error':str(error)})
         finally:
+            self.collaboration.close()
             core.ENGINES.closing=True
             core.APP.local_tools.close();core.CLAUDE.close();core.DEEPSEEK.close();core.APP.stop()
             self.pool.shutdown(wait=False,cancel_futures=True)

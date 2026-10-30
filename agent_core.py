@@ -11,6 +11,7 @@ import queue
 import secrets
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -64,7 +65,7 @@ class AppServer:
             ["codex", *extra, "app-server", "--stdio"], env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=sys.stderr if getattr(self,'diagnostics',False) else subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             bufsize=1,

@@ -235,6 +235,7 @@ class DeepSeekBridge(ClaudeBridge):
             if getattr(self,'providers',None):
                 if not available:raise RuntimeError('DeepSeek 未返回模型选项，请检查 API 配置')
                 if selected is None:
+                    if params.get('strictModel'):raise ValueError('DeepSeek 未返回指定模型，不会自动换模型')
                     selected=next((m for m in available if m['isDefault']),available[0])
             if selected:
                 model=selected['nativeValue'];data['model']=selected['model']
@@ -242,6 +243,8 @@ class DeepSeekBridge(ClaudeBridge):
                 options=rpc.request('session/set_config_option',{'sessionId':run['sessionId'],'configId':'model','value':model})['configOptions']
             effort=params.get('effort')
             option=next((o for o in options if o['id']=='reasoning_effort'),{})
+            if params.get('strictModel') and effort and not any(e.get('value')==effort for e in option.get('options',[])):
+                raise ValueError('DeepSeek 不支持指定思考强度，不会自动降级')
             if effort and any(e.get('value')==effort for e in option.get('options',[])):
                 rpc.request('session/set_config_option',{'sessionId':run['sessionId'],'configId':'reasoning_effort','value':effort})
             prompt=[]

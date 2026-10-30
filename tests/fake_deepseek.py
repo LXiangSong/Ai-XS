@@ -16,6 +16,7 @@ if os.environ.get('DEEPSEEK_TEST_ENCODED_MODELS')=='1':
     options[0]={'id':'model','currentValue':'["ai-web","first-model"]','options':[{'group':'provider','options':[
         {'value':'["ai-web","first-model"]','name':'First'},
         {'value':'["ai-web","second-model"]','name':'Second'}]}]}
+if os.environ.get('AI_XS_TEST_MULTIMODEL')=='1':options[0]['options'][0]['options'].append({'value':'second-model','name':'Second model'})
 pending=None
 for line in sys.stdin:
     message=json.loads(line);method=message.get('method');params=message.get('params',{})

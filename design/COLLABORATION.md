@@ -1,10 +1,10 @@
 # Ai-XS 协作模式设计 v1.1
 
-状态：实现规格设计稿，尚未接入 App。基于 0.8.7-alpha 的现有实现，2026-10-30。此版补齐中途改派、配置库、失败恢复、交付门槛和验收矩阵；当前没有阻塞设计推进的待确认产品项。
+状态：完整实现规格。0.9.0-alpha 已接入协作首版；下文含尚未实现的高级功能，实际交付范围和限制以 [Android 协作说明](../android/COLLABORATION.md) 为准。初稿基于 0.8.7-alpha，2026-10-30。
 
 预览：[交互原型](collaboration-preview.html)。原型使用示例数据，不调用 API、不启动 Agent、不修改项目。
 
-可行性：[真实 CLI 隔离核验](COLLABORATION_FEASIBILITY.md)。三个 Agent 均通过本地模拟 API 的双实例 / 不同模型参数 / 独立终止实验；尚未完成 APK 协作功能验收。
+可行性：[真实 CLI 隔离核验](COLLABORATION_FEASIBILITY.md)。三个 Agent 均通过本地模拟 API 的双实例 / 不同模型参数 / 独立终止实验；本轮生产调度器和真实 CLI 的验证范围见 [发布核验](../android/RELEASE_VERIFICATION.md)。
 
 ## 1. 产品目标与默认值
 

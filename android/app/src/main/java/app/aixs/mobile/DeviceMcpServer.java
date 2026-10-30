@@ -108,6 +108,7 @@ final class DeviceMcpServer implements Closeable {
                 return text(NativeEngine.request("native/extensions/"+name.substring("extensions_".length()),args).get(150,TimeUnit.SECONDS));
             if(name.equals("ask_user")){
                 JSONObject question=new JSONObject();
+                if(args.optJSONObject("_aixs")!=null) question.put("execution",args.getJSONObject("_aixs"));
                 JSONArray group=args.optJSONArray("questions");
                 if(group!=null){
                     if(group.length()<1||group.length()>8)throw new IllegalArgumentException("一次可以提出 1 到 8 个问题");
