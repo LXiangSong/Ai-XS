@@ -149,6 +149,12 @@ class CollaborationHostTests(unittest.TestCase):
         self.assertEqual(d['tasks'][1]['status'],'running')
         self.assertEqual(self.result('provider/read',{'engine':'codex'})['profiles']['thirdparty']['models'],['test-model','second-model'])
         self.result('native/collaboration/cancel',{'workflowId':key});self.wait(key,lambda d:not any(t['status'] in ('running','stopping','starting') for t in d['tasks']))
+        self.result('native/collaboration/retry',{'workflowId':key,'taskId':'t0'})
+        d=self.result('native/collaboration/read',{'workflowId':key})['workflow']
+        self.assertEqual(d['status'],'paused');self.assertEqual(d['tasks'][0]['status'],'queued')
+        self.result('native/collaboration/resume',{'workflowId':key})
+        self.wait(key,lambda d:d['tasks'][0]['status']=='running')
+        self.result('native/collaboration/cancel',{'workflowId':key})
 
     def test_duplicate_creation_and_invalid_planner_keep_original_draft(self):
         self.configured();d=self.create(('codex',),'hello');key=d['id']

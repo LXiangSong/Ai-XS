@@ -323,7 +323,7 @@ class CollaborationService:
                 for item in d['tasks']:
                     if item['id'] in downstream and item['status']=='succeeded':item.update(status='blocked',stale=True)
                 t.update(status='queued',error='',waitReason='',approvals=[]);d['accepted']=False
-                if d['status'] in ('awaiting_acceptance','completed','partial_failure'):d['status']='paused'
+                if d['status'] in ('awaiting_acceptance','completed','partial_failure','cancelled'):d['status']='paused'
             doc,_=self.store.update(key,retry,params.get('revision'));self.changed(key);return {'workflow':self.view(doc)}
         raise ValueError('未知协作操作')
 
