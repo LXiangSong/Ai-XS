@@ -1,0 +1,96 @@
+{
+  "date": "2026-10-30",
+  "status": "passed",
+  "scope": "Real installed CLI instances against loopback mock APIs; test-only queue, not the Ai-XS production scheduler or APK runtime.",
+  "versions": {
+    "codex": "0.164.0 (Termux binary, executed inside Ubuntu)",
+    "claude": "2.1.312",
+    "deepseek": "0.2.1-rc.2"
+  },
+  "participantCount": 6,
+  "agentCount": 3,
+  "modelConfigurationsPerAgent": 2,
+  "maxWorkerSlotsObserved": 2,
+  "allTasksCompleted": true,
+  "dependencyHandoffsVerified": true,
+  "privateContextIsolationVerified": true,
+  "resultRoutingVerified": true,
+  "separateSessionsVerified": true,
+  "configIsolationVerified": true,
+  "tasks": [
+    {
+      "id": "plan",
+      "agent": "codex",
+      "model": "probe-codex-a",
+      "role": "planning",
+      "deps": [],
+      "status": "completed",
+      "configUnchanged": true
+    },
+    {
+      "id": "requirements",
+      "agent": "claude",
+      "model": "probe-claude-a",
+      "role": "analysis",
+      "deps": [],
+      "status": "completed",
+      "configUnchanged": true
+    },
+    {
+      "id": "test-preparation",
+      "agent": "deepseek",
+      "model": "probe-deepseek-a",
+      "role": "test-preparation",
+      "deps": [
+        "plan"
+      ],
+      "status": "completed",
+      "configUnchanged": true
+    },
+    {
+      "id": "implementation",
+      "agent": "codex",
+      "model": "probe-codex-b",
+      "role": "implementation",
+      "deps": [
+        "plan",
+        "requirements"
+      ],
+      "status": "completed",
+      "configUnchanged": true
+    },
+    {
+      "id": "review",
+      "agent": "claude",
+      "model": "probe-claude-b",
+      "role": "patch-review",
+      "deps": [
+        "implementation",
+        "test-preparation"
+      ],
+      "status": "completed",
+      "configUnchanged": true
+    },
+    {
+      "id": "summary",
+      "agent": "deepseek",
+      "model": "probe-deepseek-b",
+      "role": "summary",
+      "deps": [
+        "review"
+      ],
+      "status": "completed",
+      "configUnchanged": true
+    }
+  ],
+  "usageObservation": {
+    "codex": "Per-thread input/output token usage was reported.",
+    "claude": "Per-process result usage was reported.",
+    "deepseek": "ACP usage_update reported context occupancy; it does not establish cumulative billing token usage."
+  },
+  "limits": [
+    "Model IDs and responses are test fixtures, not actual cloud models.",
+    "No cooper-api compatibility or rate-limit validation in this run.",
+    "No APK workflow, permission UI, cancellation UI, background recovery or sustained memory test in this run."
+  ]
+}

@@ -20,6 +20,29 @@ Codex 使用两个独立 `CODEX_HOME`、不同原生会话；Claude 使用两个
 
 原始脚本和结果保存在本机私有 `.state/collaboration-research/`：`probe_cli_isolation.py`、`probe-{codex,claude,deepseek}-result.json`、`probe-worktree-result.json`。它们未被打包进 App，也未发布。
 
+## 三种 Agent 各用两个模型配置的组合核验
+
+在上述单 Agent 双实例实验后，追加一个包含六位参与者的组合实验。使用同一 Ubuntu 中的真实 CLI、独立配置目录和原生会话；Codex 调用 Termux 的 0.164.0 二进制。测试专用队列设置全局最多两个执行任务，所有接口均为本地模拟 API。它不是现有 App 调度器的测试，因为该功能尚未实现。
+
+| 子任务 | Agent / 模型配置 | 前置任务 | 结果 |
+| --- | --- | --- | --- |
+| 规划 | Codex / probe-codex-a | 无 | 通过 |
+| 需求分析 | Claude / probe-claude-a | 无 | 通过 |
+| 测试准备 | DeepSeek / probe-deepseek-a | 规划 | 通过 |
+| 实现 | Codex / probe-codex-b | 规划、需求分析 | 通过 |
+| 审核 | Claude / probe-claude-b | 实现、测试准备 | 通过 |
+| 汇总 | DeepSeek / probe-deepseek-b | 审核 | 通过 |
+
+六项全部完成，实际观察到两个 worker 同时执行、两个模型请求同时等待响应。检查了每个请求的目标模型、任务与公共项目标识；前置任务完成后才派发，下一任务的实际 API 输入包含指定前置产物。其他参与者的私有上下文标记没有串入，输出匹配各自任务，六个会话 ID 和进程 ID 各不相同，配置文件未互相改写。
+
+“规划 / 实现 / 审核”等是本次测试任务标签，模型回复为接口预置的产物标记；没有让真实云模型生成计划、修改代码或判断审核质量。此项证明三种 CLI 的多模型配置与任务交接可以组合起来，不是对真实智能分工效果的验收。
+
+用量观察：Codex 返回分线程 Token 数据，Claude 返回各执行的 usage；DeepSeek 的 ACP `usage_update` 返回上下文占用。三者都可关联执行实例，但后者不能直接当作累计计费 Token 汇总；协作统计须保留数据来源与缺失状态。
+
+本地接口下本轮 DeepSeek 任务约 17–19 秒，包含冷启动与初始化；其他任务有等待搭档请求的时间。这不能用来比较模型速度，提示实例复用与按需回收仍需设计和真机测量。
+
+可审阅结果：[组合核验记录](collaboration-multi-model-verification.json)。原始脚本、事件结果和日志保存在 `.state/collaboration-research/probe_multi_model_workflow.py`、`multi-model-workflow-result.json`、`multi-model-workflow.log`。本次仍未验证 cooper-api 的真实模型兼容性、工具执行与限流，也未向已安装 APK 接入协作功能。
+
 ## 对当前代码的判断
 
 | 当前实现 | 影响 | 必须完成的调整 |
