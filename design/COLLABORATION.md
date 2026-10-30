@@ -18,7 +18,7 @@
 | 环境 | 共用现有 Ubuntu、Node、Python、Git 和 Agent 安装 |
 | Agent 角色 | 用户指定，可互换，不按厂商固定能力或职责 |
 | 账户 | 使用每个 Agent 已配置的官方 / 第三方 API |
-| 主负责人 | 可选三个 Agent 中任意一个，拆解和汇总也占执行名额 |
+| 主负责人 | 从已添加的参与者中选择，拆解和汇总也占执行名额 |
 | 首批模板 | 编程协作、资料整理与文档、空白流程 |
 | 默认返工上限 | 每个阶段最多 2 次，可在启动前修改 |
 | 恢复策略 | 保存已完成成果；中断的执行待用户选择恢复，不盲目重放工具 |
@@ -46,6 +46,8 @@
 
 参与者是一份独立执行配置：`participantId + Agent + 模型 + 思考强度 + 职责 + 权限`。界面使用“添加参与者”，允许多次选择同一个 Agent，也允许相同模型承担不同职责。负责人引用参与者 ID，而不是只引用 Agent 名称。
 
+执行配置可保存为预设，包含 Agent、API 来源引用、模型、思考强度和权限。参与者选择预设后可以覆盖参数，并保留自己的职责与上下文。修改预设不修改已启动执行；启动时解析成不可变配置快照。第一版预设沿用该 Agent 已启用的工具 / Skills 范围并记录版本，不把尚未支持的参与者级工具覆盖做成可用开关。
+
 例如全部使用 Codex：参与者一选当前 API 可用的模型 A 负责规划，参与者二选模型 B 负责实现，参与者三选模型 A 负责审核。也可混用 Claude Code、DeepSeek 与 Codex。模型列表取自该 Agent 的实际配置 / 发现结果，支持用户填写模型 ID；填写成功不代表协议、工具和思考参数一定兼容，运行前需做能力校验。不展示未经确认的固定模型名称或宣称任意模型跨 Agent 通用。
 
 同 Agent 多模型可以顺序执行，也可以在隔离验证通过后并行。不同模型名不会增加可用名额：默认全局仍最多两个运行任务，同一 API 网关的并发限制仍有效。工作区、设备控制、权限请求、提问、用量与日志均按参与者 / 尝试隔离。
@@ -57,6 +59,8 @@
 参与者展示安装状态、启停状态、配置的 API 来源与协议、模型；密钥只显示是否已配置。缺失安装或必要配置时，标明原因并提供相应入口。被手动停止的 Agent 不被协作静默启用。
 
 “生成计划”产生可编辑的阶段卡片：负责人、依赖、任务范围、输出、是否重任务。计划通过后“开始协作”；用户也可以直接手动填写计划。计划生成失败保留表单并提供日志入口。
+
+每张阶段卡片从参与者列表选择执行者，显示“职责 · Agent · 模型”。改变 Agent、模型、职责或删除参与者时，负责人选项同步更新；已分配任务禁止静默改派。自动分工仅能从用户启用且能力校验通过的参与者中选择，计划展示选择理由和依赖，用户可覆盖。暂不承诺根据模型名称自动判断能力或最低价格；缺少价格信息时不做成本最优推荐。
 
 ### 协作详情
 
@@ -214,15 +218,16 @@ v1 不宣传硬内存隔离或绝对限制。PRoot / worktree 也不提供进程
 
 新增私有 SQLite 数据库 `collaboration/state.db`，保存在现有运行时 `.state` 下，使用事务和 schema 迁移。普通会话原文件保持兼容。
 
-主要表：`workflows`、`participants`、`tasks`、`dependencies`、`attempts`、`events`、`artifacts`、`leases`、`resource_samples`。任务规格与运行状态分开；事件序号单调递增。数据库不写 API 密钥。
+主要表：`execution_profiles`、`workflows`、`participants`、`tasks`、`dependencies`、`attempts`、`events`、`artifacts`、`leases`、`resource_samples`。任务规格与运行状态分开；事件序号单调递增。数据库不写 API 密钥。
 
 | 对象 | 核心字段 |
 | --- | --- |
-| 协作 | id, title, objective, project, ownerAgent, status, planVersion, createdAt |
+| 执行预设 | id, name, agent, providerRef, model, effort, permission, revision |
+| 协作 | id, title, objective, project, ownerParticipantId, status, planVersion, createdAt |
 | 会话模式 | conversationId, displayMode, independentBinding, activeWorkflowId, contextRevision, pendingTransition |
-| 参与者 | id, workflowId, agent, model, effort, role, permission, providerRef, configRevision |
+| 参与者 | id, workflowId, profileId, profileRevision, overrides, agent, model, effort, role, permission, providerRef, configRevision |
 | 子任务 | id, workflowId, participantId, goal, dependencies, workload, workspace, acceptance |
-| 尝试 | id, taskId, participantId, workerId, number, state, nativeThreadId, nativeTurnId, configRevision, startedAt, endedAt |
+| 尝试 | id, taskId, participantId, workerId, number, state, nativeThreadId, nativeTurnId, configSnapshot, configRevision, startedAt, endedAt |
 | 租约 | ownerAttempt, kind, key, processIdentity, acquiredAt, heartbeatAt |
 | 事件 | sequence, workflowId, taskId, attemptId, type, payload, timestamp |
 | 产物 | id, attemptId, relativePath, kind, hash, sourceRevision, reviewStatus |
@@ -287,14 +292,42 @@ native/collaboration/fromConversation, handoffToIndependent
 
 验收：进程被杀后不重复执行未知副作用；用户暂停不被资源恢复自动撤销；资源读数缺失不当作“内存充足”；读旧日志不跳动，所有失败可关联具体尝试。
 
-## 11. 参考范围
+## 11. GitHub 源码核对与设计依据
 
-2026-10-30 核对项目仓库 README。这里只借鉴交互和架构，尚未引入第三方项目代码或框架依赖。
+2026-10-30 核对以下固定提交的源码；结论限于所列实现，不据此承诺 Android 上可以直接并行运行 CLI。这里只借鉴交互和架构，尚未引入第三方项目代码或框架依赖。
 
-- [Vibe Kanban](https://github.com/BloopAI/vibe-kanban)：任务看板、工作区、差异审核与反馈。
-- [Claude Squad](https://github.com/smtg-ai/claude-squad)：多 Agent 会话、worktree 隔离。其许可为 AGPL-3.0；引入具体实现前单独核对许可兼容性。
-- [LangGraph](https://github.com/langchain-ai/langgraph)：持久化状态、执行恢复与人工介入。
-- [CrewAI](https://github.com/crewAIInc/crewAI)：角色分工、任务委派和显式流程。
-- [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)：交接、并行与检查点模式。
+| 项目与源码 | 已核对的做法 | Ai-XS 采用的设计 |
+| --- | --- | --- |
+| [Vibe Kanban：ExecutorConfig](https://github.com/BloopAI/vibe-kanban/blob/7c3807084daad0d9d315064f60fa869de254f027/crates/executors/src/profile.rs#L125)；[Codex 配置应用](https://github.com/BloopAI/vibe-kanban/blob/7c3807084daad0d9d315064f60fa869de254f027/crates/executors/src/executors/codex.rs#L196) | 执行器类型、预设变体与模型 / 思考 / 权限覆盖分别存储，Codex 适配器应用覆盖值 | Agent 安装只保留一份；允许保存多个执行预设，参与者选择并覆盖参数，尝试启动时固定配置 |
+| [Vibe Kanban：Session](https://github.com/BloopAI/vibe-kanban/blob/7c3807084daad0d9d315064f60fa869de254f027/crates/db/src/models/session.rs#L23) | 会话有独立 ID，关联 workspace 与 executor | 项目、用户可见会话、子任务原生会话分别建模；共用项目不等于共用一个可变 CLI 会话 |
+| [CrewAI：Agent](https://github.com/crewAIInc/crewAI/blob/97bbfb64811775a965304bda45c8ec0e8e4ef3a2/lib/crewai/src/crewai/agent/core.py#L214)；[Task](https://github.com/crewAIInc/crewAI/blob/97bbfb64811775a965304bda45c8ec0e8e4ef3a2/lib/crewai/src/crewai/task.py#L130) | 逻辑角色实例可配置 llm；任务指定 agent、预期输出、上下文任务与异步执行选项 | 任务引用参与者 ID，模型归参与者执行配置；依赖产物和验收条件显式记录。不能把 async_execution 当成依赖分析或文件冲突保护 |
+| [Microsoft Agent Framework：并行示例](https://github.com/microsoft/agent-framework/blob/59b183b5bcb2f192c6206d50c2e19cfed396dada/python/samples/03-workflows/orchestrations/concurrent_agents.py#L36) | 同一模型客户端创建不同职责实例，通过 ConcurrentBuilder 并行分发并汇集结果；该示例给各角色相同输入 | 负责人先拆解任务，仅对无依赖任务并行派发，随后汇总；不同任务使用各自输入，不把用户整条需求无差别发给全部角色 |
 
-第一版采用现有 Python + SQLite 实现轻量调度，避免为手机引入整套桌面 / 云服务平台；后续根据功能和测试结果决定是否使用框架。
+CrewAI / Microsoft 示例里的 Agent 是带角色的模型调用实例，和 Ai-XS 设置里的“Agent CLI 程序”不是同一层概念。它们验证了角色与模型可分开配置的设计模式，并未验证 Codex / Claude / DeepSeek CLI 在 Ai-XS 上的实例隔离。Microsoft 上述示例共用一个模型客户端，也不能作为“其示例已演示多模型”的依据。
+
+### 落到 Ai-XS 的五层对象
+
+1. Agent 程序：安装 / 版本 / 启停与 CLI 适配器。
+2. 执行预设：Agent + API 来源引用 + 模型 + 思考强度 + 权限，方便重复使用。
+3. 参与者：预设引用 + 参数覆盖 + 职责 + 独立上下文；负责人也是参与者。
+4. 子任务：目标 + 执行参与者 + 依赖 + 输入产物 + 预期输出 + 验收条件。
+5. 执行尝试：固定配置快照 + worker / 原生会话 + 工作区 + 事件 / 用量 / 权限请求路由；重试创建新尝试。
+
+### 同一 Agent、不同模型的具体流程
+
+模型 A / B 是当前 API 可用且通过 CLI 兼容性校验的占位名，不代表指定厂商型号。
+
+| 阶段 | 执行参与者 | 依赖与交付 |
+| --- | --- | --- |
+| 规划 | 规划者：Codex / 模型 A | 读取目标，形成可编辑任务与验收标准 |
+| 实现 | 开发者：Codex / 模型 B | 依赖已确认计划，在独立工作区生成补丁 |
+| 测试准备 | 检查者：Codex / 模型 A | 依赖计划，整理测试用例；可与实现并行，结果只算测试准备 |
+| 补丁审核 | 检查者：Codex / 模型 A | 等待实现和测试准备，核对实际补丁版本，输出问题或通过结论 |
+| 集成与验证 | 开发者：Codex / 模型 B | 等待审核通过，串行集成并运行验证；失败回到有限返工 |
+| 汇总 | 规划者：Codex / 模型 A | 核对产物和验证证据，提交用户验收 |
+
+用户可以把任何一位参与者改成 Claude Code 或 DeepSeek，任务依赖保持，执行前重新验证兼容性。负责人输出的计划只是一份提案：调度器验证任务编号、循环依赖、权限、参与者能力与资源上限后才允许执行；模型不能通过文本指令绕过调度器。
+
+其他参考仍保留：[Claude Squad](https://github.com/smtg-ai/claude-squad) 的 worktree 隔离与会话交互、[LangGraph](https://github.com/langchain-ai/langgraph) 的状态持久化与人工介入。此轮未逐项核对它们的实现，不将其列为上述字段设计的源码证据。
+
+第一版采用现有 Python + SQLite 实现轻量调度，原生 Material 页面承载交互；先完成第 10 节的实例隔离与真机验证，再开放并行。无需引入这些项目整套桌面或云平台，也不为每个模型复制运行环境。
