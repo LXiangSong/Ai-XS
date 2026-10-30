@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Spark: the same four-point star the app uses as its agent mark. -->
+    <path android:fillColor="#FFFFFF" android:fillType="evenOdd"
+        android:pathData="M54,26l7.2,20.8L82,54l-20.8,7.2L54,82l-7.2,-20.8L26,54l20.8,-7.2z" />
+    <path android:fillColor="#C9CBFF" android:fillAlpha="0.92"
+        android:pathData="M73,29l2.6,6.4L82,38l-6.4,2.6L73,47l-2.6,-6.4L64,38l6.4,-2.6z" />
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.55"
+        android:pathData="M35,71m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0" />
+</vector>

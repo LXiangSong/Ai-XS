@@ -1,0 +1,57 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'app.aixs.mobile'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+    defaultConfig {
+        applicationId 'app.aixs.mobile'
+        minSdk 26
+        targetSdk 35
+        versionCode 38
+        versionName '0.8.5-alpha'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    def signingFolder = rootProject.file('../.state/android-signing')
+    signingConfigs {
+        release {
+            def passwordFile = new File(signingFolder, 'password')
+            def releaseKey = new File(signingFolder, 'release.p12')
+            if (passwordFile.isFile() && releaseKey.isFile()) {
+                storeFile releaseKey
+                storePassword passwordFile.text.trim()
+                keyAlias 'aixs'
+                keyPassword passwordFile.text.trim()
+                storeType 'PKCS12'
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    packaging { jniLibs { useLegacyPackaging true } }
+    lint { abortOnError true }
+}
+
+dependencies {
+    implementation 'com.google.android.material:material:1.14.0'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
+    implementation 'androidx.core:core:1.15.0'
+    implementation 'io.noties.markwon:core:4.6.2'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}
+
+def prepareAssets = tasks.register('prepareRuntimeAssets', Exec) {
+    workingDir rootProject.file('..')
+    commandLine providers.gradleProperty('pythonCommand').getOrElse('python3'), 'android/tools/prepare_app_assets.py'
+}
+tasks.named('preBuild').configure { dependsOn prepareAssets }

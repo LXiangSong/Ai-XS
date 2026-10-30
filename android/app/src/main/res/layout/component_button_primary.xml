@@ -1,0 +1,1 @@
+<com.google.android.material.button.MaterialButton xmlns:android="http://schemas.android.com/apk/res/android" style="@style/Xs.Button.Primary" android:layout_height="wrap_content" />

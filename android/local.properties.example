@@ -1,0 +1,2 @@
+# Copy to local.properties; keep SDK and signing paths private.
+sdk.dir=/absolute/path/to/android-sdk

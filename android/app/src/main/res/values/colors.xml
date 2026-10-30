@@ -1,0 +1,36 @@
+<resources>
+    <!-- Ai-XS light palette: quiet paper, ink text, a single iris accent. -->
+    <color name="xs_bg">#F5F6F9</color>
+    <color name="xs_surface">#FFFFFF</color>
+    <color name="xs_surface_container_low">#FAFBFC</color>
+    <color name="xs_surface_container">#FFFFFF</color>
+    <color name="xs_surface_container_high">#EFF1F5</color>
+    <color name="xs_surface_container_highest">#E6E9F0</color>
+    <color name="xs_surface_variant">#EFF1F5</color>
+
+    <color name="xs_on_surface">#0F1319</color>
+    <color name="xs_on_surface_variant">#5B6572</color>
+    <color name="xs_on_surface_faint">#8B95A3</color>
+    <color name="xs_outline">#D7DCE4</color>
+    <color name="xs_outline_variant">#E7EAF0</color>
+
+    <color name="xs_primary">#4C51D9</color>
+    <color name="xs_on_primary">#FFFFFF</color>
+    <color name="xs_primary_container">#E7E8FF</color>
+    <color name="xs_on_primary_container">#1A1C66</color>
+
+    <color name="xs_secondary">#0E9E86</color>
+    <color name="xs_on_secondary">#FFFFFF</color>
+    <color name="xs_secondary_container">#DDF5EF</color>
+    <color name="xs_on_secondary_container">#063B33</color>
+
+    <color name="xs_error">#C5352B</color>
+    <color name="xs_on_error">#FFFFFF</color>
+    <color name="xs_error_container">#FCE9E7</color>
+    <color name="xs_on_error_container">#5A120D</color>
+
+    <color name="xs_success">#0E9E86</color>
+    <color name="xs_warning">#A96500</color>
+    <color name="xs_scrim">#0F1319</color>
+    <color name="xs_press">#1A4C51D9</color>
+</resources>

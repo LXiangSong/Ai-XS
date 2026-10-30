@@ -1,0 +1,40 @@
+name: Full project tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Prepare temporary test signing identity
+        run: |
+          mkdir -p .state/android-signing
+          printf '%s' 'ci-test-only' > .state/android-signing/password
+          keytool -genkeypair -keystore .state/android-signing/release.p12 -storetype PKCS12 -storepass ci-test-only -keypass ci-test-only -alias aixs -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Ai-XS CI Test Only'
+      - name: Test, lint and build
+        run: python android/tools/test_all.py
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/reports/lint-results-release.html
+          if-no-files-found: ignore

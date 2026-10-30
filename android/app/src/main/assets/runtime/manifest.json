@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "architecture": "arm64-v8a",
+  "base": "Ubuntu Base 24.04.5",
+  "source": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz",
+  "sourceSha256": "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2",
+  "archiveSha256": "fc7f76deec512919bc6ea6ce0d142c4a1a0d09cd6de0679fe8e2af19ae6e4891",
+  "rootfsCount": 1,
+  "nativeFiles": [
+    {
+      "file": "libproot.so",
+      "input": "bin/proot",
+      "inputSha256": "bc3e5416748276374c513eaad1c6cabedc94246fdf2dd58fa6531374e481fa09",
+      "sha256": "4bdf8d919eb8f1bf7fbce7a7a8e38d542c8409506b7b3853e48dd4b26ade5787"
+    },
+    {
+      "file": "libloader.so",
+      "input": "libexec/proot/loader",
+      "inputSha256": "1da54355333cca3fb6ee10e3b82a24df24fb230c99241ce83809bf9e240609b5",
+      "sha256": "1da54355333cca3fb6ee10e3b82a24df24fb230c99241ce83809bf9e240609b5"
+    },
+    {
+      "file": "libloader32.so",
+      "input": "libexec/proot/loader32",
+      "inputSha256": "c429996fee730e1a4fe12625b22dab5a5bc2847a4cae274d36fd4a19cd8299a8",
+      "sha256": "c429996fee730e1a4fe12625b22dab5a5bc2847a4cae274d36fd4a19cd8299a8"
+    },
+    {
+      "file": "libtalloc.so",
+      "input": "lib/libtalloc.so.2",
+      "inputSha256": "742b438c4d09e276985a61d44164c9de207b6d8cc268f3018cb3001961bcb309",
+      "sha256": "742b438c4d09e276985a61d44164c9de207b6d8cc268f3018cb3001961bcb309"
+    },
+    {
+      "file": "libandroid-shmem.so",
+      "input": "lib/libandroid-shmem.so",
+      "inputSha256": "84475798e07c8174dbbfaec70a827fdb02f19ffa69a589380c13e7507fd0e731",
+      "sha256": "84475798e07c8174dbbfaec70a827fdb02f19ffa69a589380c13e7507fd0e731"
+    }
+  ]
+}

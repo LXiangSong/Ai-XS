@@ -1,0 +1,21 @@
+<com.google.android.material.textfield.TextInputLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="6dp"
+    android:layout_marginBottom="10dp"
+    app:boxBackgroundMode="outline"
+    app:boxCornerRadiusBottomEnd="14dp"
+    app:boxCornerRadiusBottomStart="14dp"
+    app:boxCornerRadiusTopEnd="14dp"
+    app:boxCornerRadiusTopStart="14dp"
+    app:boxStrokeColor="@color/xs_primary">
+    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+        android:id="@+id/dropdown_value"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:inputType="none"
+        android:singleLine="true"
+        android:textSize="14sp" />
+</com.google.android.material.textfield.TextInputLayout>
