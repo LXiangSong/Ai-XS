@@ -22,6 +22,7 @@ Ai-XS 是独立原生 Android App，不依赖 AI-Web 服务或网页前端。
 | `android/runtime/agent_package.py` | 独立目录安装、包校验、版本检查与原子切换 |
 | `android/tools` | 运行时资产准备、Gradle 构建、部署包制作与全量测试 |
 | `android/tests` / `android/app/src/test` / `tests/fake_*` | Python 协议集成与 Java 界面逻辑测试 |
+| `design/COLLABORATION.md` / `design/collaboration-preview.html` | 协作模式设计与独立交互原型；尚未接入 App |
 
 ## 数据边界
 

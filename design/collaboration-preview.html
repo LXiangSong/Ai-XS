@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ai-XS · 协作模式交互设计</title>
+<style>
+:root{--bg:#f5f5f8;--panel:#fff;--ink:#242333;--muted:#747385;--line:#e7e5ee;--accent:#6254cf;--soft:#eeebfc;--green:#297b60;--amber:#9a6920}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}button,input,textarea,select{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:10px 16px;background:var(--soft);color:var(--accent)}button:disabled{cursor:default;opacity:.5}.primary{background:var(--accent);color:white}.plain{background:transparent;color:var(--muted)}.outline{background:transparent;border:1px solid var(--line);color:var(--ink)}.danger{color:#b64450;background:#fff0f1}input,textarea,select{width:100%;border:1px solid var(--line);background:white;color:var(--ink);border-radius:10px;padding:10px;margin:6px 0 16px}textarea{resize:vertical;min-height:95px}a{color:var(--accent)}h1,h2,h3,p{margin:0}h1{font-size:25px;letter-spacing:-.5px}h2{font-size:19px}h3{font-size:15px}.muted{color:var(--muted)}.small{font-size:12px}.notice{padding:10px 20px;background:#242333;color:#e7e4fa;display:flex;justify-content:space-between;gap:12px;font-size:12px}.layout{display:flex;min-height:calc(100vh - 42px)}aside{width:245px;padding:30px 18px;background:var(--panel);border-right:1px solid var(--line);flex-shrink:0}.brand{font-size:22px;font-weight:750;padding:0 12px;margin-bottom:30px}.brand span{font-size:11px;font-weight:450;display:block;color:var(--muted)}nav{display:grid;gap:7px}nav button{text-align:left;background:transparent;color:var(--muted)}nav button.active{background:var(--soft);color:var(--accent);font-weight:650}main{width:100%;max-width:1050px;padding:36px 40px;margin:auto}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:25px}.row{display:flex;gap:10px;align-items:center}.wrap{flex-wrap:wrap}.between{justify-content:space-between}.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;margin:14px 0}.resource{border-radius:13px;padding:12px 16px;background:#ecebf3;display:flex;justify-content:space-between;gap:14px;align-items:center}.resource button{padding:5px 10px}.badge{display:inline-block;font-size:11px;border-radius:6px;padding:3px 8px;background:var(--soft);color:var(--accent)}.badge.green{background:#e8f3ec;color:var(--green)}.badge.amber{background:#faf0de;color:var(--amber)}.badge.gray{background:#f0eff4;color:var(--muted)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.progress{height:5px;border-radius:4px;background:var(--line);margin:16px 0}.progress>div{height:100%;width:33%;background:var(--accent);border-radius:4px}.task{padding:15px 0;border-bottom:1px solid var(--line);cursor:pointer}.task:last-child{border:0}.task:hover h3{color:var(--accent)}.task p{margin-top:4px;font-size:12px;color:var(--muted)}.phase{font-size:11px;color:var(--muted);margin:20px 0 4px;letter-spacing:1px}.dot{width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:7px}.chat{min-height:330px;padding-top:15px}.bubble{max-width:90%;padding:15px 18px;border-radius:16px;margin-bottom:18px;background:var(--panel);border:1px solid var(--line)}.bubble.user{margin-left:auto;background:var(--soft);border:0}.composer{border:1px solid var(--line);border-radius:18px;padding:12px 14px;background:var(--panel)}.composer textarea{border:0;padding:8px 0;margin:0;min-height:65px;outline:0}.composer button{padding:6px 10px}.composer select{width:auto;padding:5px 8px;margin:0;font-size:12px;border:0;background:transparent}.composer .clip{width:22px;height:22px;display:block}.project{font-size:12px;color:var(--muted);margin-bottom:7px}.footer-note{padding:15px 0;font-size:12px;color:var(--muted)}.banner{background:#edf3ef;color:var(--green);padding:12px 16px;border-radius:12px;margin-bottom:16px}.hidden{display:none!important}dialog{border:1px solid var(--line);border-radius:20px;padding:25px;width:min(480px,92vw);color:var(--ink);box-shadow:0 22px 90px #1510272b}dialog::backdrop{background:#17112266}dialog p{margin:12px 0 18px}dialog button{margin:4px 4px 4px 0}.choices{display:grid;gap:8px}.choices button{text-align:left}.choices small{display:block;color:var(--muted);margin-top:3px}.statusbar{font-size:12px;color:var(--muted);margin:12px 0}label{font-size:13px;font-weight:550}.backdrop{position:fixed;inset:0;background:#0005;z-index:4}.mobile-nav{display:none}#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#282535;color:white;padding:12px 20px;border-radius:12px;z-index:20;max-width:90vw}
+@media(max-width:760px){aside{display:none;position:fixed;top:0;bottom:0;left:0;z-index:5;width:250px;box-shadow:0 0 40px #0002}aside.open{display:block}main{padding:20px 17px;align-self:flex-start}.mobile-nav{display:inline-block;padding:5px 10px}.notice{padding:8px 14px}.grid{grid-template-columns:1fr}.top{margin-bottom:18px}h1{font-size:23px}.card{padding:16px}.resource{font-size:12px;align-items:flex-start}.row{gap:7px}.task .row.between{align-items:flex-start}.statusbar{font-size:11px}}
+</style>
+</head>
+<body>
+<div class="notice"><span>Ai-XS · 协作模式设计预览</span><span>示例交互 · 未接入 Agent</span></div>
+<div id="shade" class="backdrop hidden" onclick="closeNav()"></div>
+<div class="layout">
+<aside id="nav"><div class="brand">Ai-XS<span>手机上的 AI 工作台</span></div><nav>
+<button id="nav-chat" onclick="show('chat')">◯　当前会话</button>
+<button id="nav-board" class="active" onclick="show('board')">▦　协作 <span class="badge">1</span></button>
+<button onclick="toast('项目：/root/projects/Ai-XS；原型不访问实际文件')">▱　项目</button>
+<button onclick="settings()">⚙　协作与资源设置</button>
+</nav><p class="small muted" style="margin:35px 12px">Codex · Claude Code · DeepSeek<br>共用环境，任务按需运行</p></aside>
+<main>
+<div class="top"><div class="row"><button class="mobile-nav plain" aria-label="打开左侧菜单" onclick="openNav()">☰</button><h1 id="title">协作</h1></div><div id="top-actions"></div></div>
+<section id="board">
+<div class="resource"><span><span class="dot"></span><b id="board-res">运行 2 / 2</b> · 重任务 1 / 1</span><button onclick="settings()">资源设置</button></div>
+<div class="row" style="margin:20px 0"><span class="badge">进行中 1</span><span class="muted small">待处理 0</span><span class="muted small">已结束 0</span></div>
+<div class="card"><div class="row between"><h2>优化运行日志与诊断体验</h2><span id="board-state" class="badge">执行中</span></div><p class="muted small" style="margin-top:8px">Ai-XS · 编程协作 · 负责人 Claude Code</p><div class="progress"><div></div></div><div class="row between"><span class="small">2 / 6 已完成 · Codex、DeepSeek 执行中</span><button onclick="show('detail')">查看协作 →</button></div></div>
+<p class="footer-note">也可以从当前会话进入协作，保留已有历史与项目。</p>
+</section>
+<section id="detail" class="hidden">
+<div class="row between wrap"><span class="project">▱ Ai-XS / root / projects</span><button class="outline" onclick="returnToIndependent()">回到独立模式</button></div>
+<div id="flow-banner" class="banner hidden"></div>
+<div class="resource"><span><b>2 / 6 已完成</b><br><span id="detail-state">Codex 与 DeepSeek 正在并行执行</span></span><button id="pause-button" onclick="togglePause()">暂停派发</button></div>
+<div class="card"><div class="row between"><h2>子任务</h2><span class="badge gray">最多 2 个并行</span></div>
+<div class="phase">阶段一 · 计划</div>
+<div class="task" onclick="task('plan')"><div class="row between"><h3>明确问题与验收标准</h3><span class="badge green">已完成</span></div><p>Claude Code · 产物：任务计划与验收清单</p></div>
+<div class="task" onclick="task('baseline')"><div class="row between"><h3>记录项目基线与工作区</h3><span class="badge green">已完成</span></div><p>Codex · 两个执行工作区已就绪</p></div>
+<div class="phase">阶段二 · 并行执行</div>
+<div class="task" onclick="task('code')"><div class="row between"><h3>实现日志分层与进度界面</h3><span class="badge">运行中</span></div><p>Codex · 独立工作区 · 正在构建 · 重任务</p></div>
+<div class="task" onclick="task('review')"><div class="row between"><h3>核查错误处理与测试遗漏</h3><span class="badge">运行中</span></div><p>DeepSeek · 只读检查 · 正在整理边界情况</p></div>
+<div class="phase">阶段三 · 验收交付</div>
+<div class="task" onclick="task('test')"><div class="row between"><h3>合并修改并运行回归测试</h3><span class="badge gray">等待依赖</span></div><p>Codex · 等待实现与独立审核完成</p></div>
+<div class="task" onclick="task('deliver')"><div class="row between"><h3>汇总结果，提交验收</h3><span class="badge gray">等待依赖</span></div><p>Claude Code · 汇总修改、测试与未解决问题</p></div>
+</div>
+<div class="card"><h3>成果与验收</h3><p class="muted small" style="margin:8px 0">当前仅有计划和项目基线；代码修改尚未合入主项目。</p><button onclick="toast('示例产物：任务计划.md、基线记录.json；实现与测试产物尚未完成')">查看已有成果</button></div>
+<div class="project">▱ Ai-XS　·　补充给负责人 Claude Code</div><div class="composer"><textarea aria-label="补充协作要求" placeholder="补充要求，或询问当前进度…"></textarea><div class="row between"><div class="row"><button class="plain" aria-label="添加附件" onclick="toast('附件入口：文件 / 图片；这是交互示例')"><svg class="clip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 13 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l9-9a4 4 0 0 1 6 6l-9 9a2 2 0 0 1-3-3l8-8"/></svg></button><span class="small muted">当前模型</span><select aria-label="思考强度"><option>思考：默认</option><option>思考：高</option></select></div><button onclick="toast('原型不发送消息，也不调用付费 API')">发送</button></div></div>
+</section>
+<section id="chat" class="hidden">
+<div class="row between"><span class="project">▱ Ai-XS · 原会话历史保留</span><button class="outline" onclick="enterCollaboration()">独立 ▾</button></div>
+<div id="chat-background" class="banner hidden">协作在后台运行，占用 2 / 2 名额。新任务需排队；项目写入需独立工作区或等待写入锁。</div>
+<div class="chat"><div class="bubble user">优化运行日志，安装和更新在当前页面显示进度，失败后再提示查看日志。</div><div class="bubble"><b>Claude Code</b><p style="margin-top:8px">已整理需求。可以继续独立处理，也可以进入协作，分别安排实现、审核和测试。</p></div><div id="handoff" class="bubble hidden"><b>协作交接摘要</b><p style="margin-top:8px">计划与项目基线已完成。实现与审核未完成；尚无代码合入主项目。原任务与产物可从协作入口继续查看。</p></div></div>
+<div class="project">▱ Ai-XS　·　<span id="independent-agent">Claude Code</span></div><div class="composer"><textarea aria-label="独立模式输入" placeholder="继续当前会话…"></textarea><div class="row between"><span class="small muted">当前模型　·　思考：默认</span><button onclick="toast(background ? '示例：新任务等待并发名额；不会抢占后台任务' : '原型不发送实际任务')">发送</button></div></div>
+<p class="footer-note">同一个会话可切换独立 / 协作，历史与统计保留。</p>
+</section>
+<section id="create" class="hidden">
+<p id="create-origin" class="banner">以当前会话和项目作为协作输入；切换本身不执行任务。</p>
+<div class="card"><label for="goal">协作目标</label><textarea id="goal">优化运行日志：普通信息与 Debug 分开，安装、更新在原页面显示进度，失败后提供日志入口。</textarea><label for="project">项目 / 工作目录</label><input id="project" value="/root/projects/Ai-XS"><div class="grid"><div><label for="template">流程模板</label><select id="template"><option>编程协作</option><option>资料整理与文档</option><option>空白流程</option></select></div><div><label for="owner">负责人</label><select id="owner"><option>Claude Code</option><option>Codex</option><option>DeepSeek</option></select></div></div><label for="parallel">最大并行任务数</label><select id="parallel"><option value="1">1 · 顺序执行</option><option value="2" selected>2 · 默认</option><option value="3">3 · 实验模式，需实测资源</option></select><p class="small muted">参与者：Claude Code、Codex、DeepSeek。实际版本需校验安装、API 配置及启停状态。</p></div>
+<div class="row wrap"><button class="outline" onclick="toast('正式版支持手动添加阶段、依赖、负责人和验收条件')">手动填写计划</button><button class="primary" onclick="plan()">生成计划（示例）</button></div><p class="footer-note">正式版点击生成计划将调用负责人；本原型仅展示静态计划。</p>
+<div id="plan" class="card hidden"><h3>计划预览 · 可以调整负责人和依赖</h3><p style="margin:12px 0">Claude 拆解 → Codex 实现 ∥ DeepSeek 审核 → Codex 测试 → Claude 汇总</p><p class="small muted">编程产物先在独立工作区生成，测试与审核后再验收合入。</p><button class="primary" style="margin-top:15px" onclick="startDemo()">开始协作（演示）</button></div>
+</section>
+</main></div>
+<dialog id="modal"><div id="modal-content"></div><div style="margin-top:16px"><button class="plain" onclick="closeModal()">关闭</button></div></dialog>
+<div id="toast" class="hidden" role="status"></div>
+<script>
+let paused=false,background=false,page='board',toastTimer;
+const $=id=>document.getElementById(id);
+function toast(text){$('toast').textContent=text;$('toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.add('hidden'),3800)}
+function openNav(){$('nav').classList.add('open');$('shade').classList.remove('hidden')}
+function closeNav(){$('nav').classList.remove('open');$('shade').classList.add('hidden')}
+function modal(html){$('modal-content').innerHTML=html;$('modal').showModal()}
+function closeModal(){$('modal').close()}
+function show(name){page=name;for(const id of ['board','detail','chat','create'])$(id).classList.toggle('hidden',id!==name);$('title').textContent={board:'协作',detail:'优化运行日志',chat:'当前会话',create:'新建协作'}[name];$('top-actions').innerHTML=name==='board'?'<button class="primary" onclick="newWorkflow()">＋ 新建</button>':name==='detail'?'<button class="plain" onclick="show(\'board\')">协作列表</button>':'';for(const id of ['chat','board'])$('nav-'+id).classList.toggle('active',name===id||id==='board'&&name==='detail');closeNav();window.scrollTo(0,0)}
+function newWorkflow(){$('create-origin').textContent='新建独立协作任务；可以选择项目、参与者和负责人。';$('plan').classList.add('hidden');show('create')}
+function enterCollaboration(){modal('<h2>进入协作模式</h2><p>保留当前会话历史、项目与统计。先确认目标与分工，再开始协作。</p><div class="choices"><button onclick="closeModal();fromConversation()">用当前目标创建协作<small>生成可编辑计划；本次点击不发送请求</small></button><button onclick="closeModal();show(\'detail\')">查看已有协作<small>继续之前的任务，不重复创建或执行</small></button></div>')}
+function fromConversation(){$('create-origin').textContent='从当前会话进入协作：历史和会话 ID 保留，原独立任务需完成或中断后再派发。';$('plan').classList.add('hidden');show('create')}
+function plan(){if(!$('goal').value.trim()){toast('请填写协作目标');return}$('plan').classList.remove('hidden');$('plan').scrollIntoView({behavior:'smooth',block:'nearest'})}
+function startDemo(){const count=$('parallel').value;modal('<h2>计划已准备（示例）</h2><p>选择的并发上限：'+count+'。正式版将按依赖和资源调度任务；这里展示预置的两个并行任务。</p><button class="primary" onclick="closeModal();show(\'detail\')">查看协作详情</button>')}
+function togglePause(){paused=!paused;$('pause-button').textContent=paused?'恢复派发':'暂停派发';$('flow-banner').classList.toggle('hidden',!paused);$('flow-banner').textContent='已暂停派发 · 仍有 2 个任务运行。需要释放资源时，可在子任务中选择停止。';$('detail-state').textContent=paused?'不再派发新任务，已运行任务继续':'Codex 与 DeepSeek 正在并行执行';$('board-state').textContent=paused?'暂停派发':'执行中'}
+function returnToIndependent(){modal('<h2>回到独立模式</h2><p>已有 2 个子任务正在运行。选择继续使用的 Agent，并决定如何处理后台任务。</p><label for="return-agent">继续使用</label><select id="return-agent"><option>Claude Code</option><option>Codex</option><option>DeepSeek</option></select><div class="choices"><button onclick="backToChat(true)">转入后台，回到独立<small>后台仍占名额；同项目写入需工作区或等待锁</small></button><button class="danger" onclick="stopTransition()">中断任务，回到独立<small>正式版确认中断完成后才能开始独立任务</small></button></div>')}
+function stopTransition(){const agent=$('return-agent').value;modal('<h2>中断协作中的任务？</h2><p>先停止派发，再中断本协作的运行任务，保留已完成产物。正式版会等待实际退出确认，不会把任务隐藏后当作已停止。</p><button class="danger" onclick="finishStop(\''+agent+'\')">查看中断后的示例</button>')}
+function finishStop(agent){$('independent-agent').textContent=agent;backToChat(false,false);toast('演示中断后的页面；未操作实际进程')}
+function backToChat(keep,readAgent=true){if(readAgent)$('independent-agent').textContent=$('return-agent').value;background=keep;closeModal();$('chat-background').classList.toggle('hidden',!keep);$('handoff').classList.remove('hidden');show('chat')}
+const tasks={plan:['明确问题与验收标准','Claude Code','已完成','交付：计划与验收标准。'],baseline:['记录项目基线与工作区','Codex','已完成','交付：基线记录。'],code:['实现日志分层与进度界面','Codex','运行中','独立工作区 · 重任务名额 1/1 · 示例活动：正在构建。'],review:['核查错误处理与测试遗漏','DeepSeek','运行中','只读任务 · 正在整理问题；不会与实现任务交叉写入。'],test:['合并修改并运行回归测试','Codex','等待依赖','等待实现、审核完成以及重任务名额可用。'],deliver:['汇总结果，提交验收','Claude Code','等待依赖','等待测试结果，不把未完成修改当作已交付成果。']};
+function task(id){const t=tasks[id];modal('<h2>'+t[0]+'</h2><p><span class="badge">'+t[2]+'</span>　'+t[1]+'</p><p>'+t[3]+'</p><p class="small muted">流程、子任务与尝试均有独立编号；日志和用量可回溯。</p>'+(t[2]==='运行中'?'<button class="outline" onclick="toast(\'正式版会发送真实中断并等待退出；原型不改变进程\')">停止子任务</button>':'')+'<button class="plain" onclick="toast(\'正式版在当前详情展开实时活动，不自动跳到运行日志\')">展开活动</button>')}
+function settings(){modal('<h2>协作与资源管理</h2><p>默认 2 个执行任务，同一 Agent 同时 1 个，重任务同时 1 个。普通会话也计入总数。</p><label for="limit">并发上限</label><select id="limit"><option>1 · 顺序</option><option selected>2 · 默认</option><option>3 · 实验</option></select><p class="small muted">内存紧张时暂停新派发，运行任务由你选择是否中断。不会自动杀掉任务。原型不采集设备信息。</p><button class="primary" onclick="closeModal();toast(\'仅预览设置，尚未写入 App\')">完成</button>')}
+show('board');
+</script>
+</body>
+</html>
