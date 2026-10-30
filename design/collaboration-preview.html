@@ -54,9 +54,9 @@
 </section>
 <section id="create" class="hidden">
 <p id="create-origin" class="banner">以当前会话和项目作为协作输入；切换本身不执行任务。</p>
-<div class="card"><label for="goal">协作目标</label><textarea id="goal">优化运行日志：普通信息与 Debug 分开，安装、更新在原页面显示进度，失败后提供日志入口。</textarea><label for="project">项目 / 工作目录</label><input id="project" value="/root/projects/Ai-XS"><div class="grid"><div><label for="template">流程模板</label><select id="template"><option>编程协作</option><option>资料整理与文档</option><option>空白流程</option></select></div><div><label for="owner">负责人</label><select id="owner"><option>Claude Code</option><option>Codex</option><option>DeepSeek</option></select></div></div><label for="parallel">最大并行任务数</label><select id="parallel"><option value="1">1 · 顺序执行</option><option value="2" selected>2 · 默认</option><option value="3">3 · 实验模式，需实测资源</option></select><p class="small muted">参与者：Claude Code、Codex、DeepSeek。实际版本需校验安装、API 配置及启停状态。</p></div>
+<div class="card"><label for="goal">协作目标</label><textarea id="goal">优化运行日志：普通信息与 Debug 分开，安装、更新在原页面显示进度，失败后提供日志入口。</textarea><label for="project">项目 / 工作目录</label><input id="project" value="/root/projects/Ai-XS"><div class="grid"><div><label for="template">流程模板</label><select id="template"><option>编程协作</option><option>资料整理与文档</option><option>空白流程</option></select></div><div><label for="owner">负责人</label><select id="owner"><option>Claude Code</option><option>Codex</option><option>DeepSeek</option></select></div></div><label for="parallel">最大并行任务数</label><select id="parallel"><option value="1">1 · 顺序执行</option><option value="2" selected>2 · 默认</option><option value="3">3 · 实验模式，需实测资源</option></select><h3>协作参与者</h3><p class="small muted">可重复选择同一个 Agent，分别配置模型和职责。模型 ID 仅为示例，正式版从对应 API 配置中选择并校验。</p><div id="participants"></div><button class="outline" onclick="addParticipant()">＋ 添加参与者</button></div>
 <div class="row wrap"><button class="outline" onclick="toast('正式版支持手动添加阶段、依赖、负责人和验收条件')">手动填写计划</button><button class="primary" onclick="plan()">生成计划（示例）</button></div><p class="footer-note">正式版点击生成计划将调用负责人；本原型仅展示静态计划。</p>
-<div id="plan" class="card hidden"><h3>计划预览 · 可以调整负责人和依赖</h3><p style="margin:12px 0">Claude 拆解 → Codex 实现 ∥ DeepSeek 审核 → Codex 测试 → Claude 汇总</p><p class="small muted">编程产物先在独立工作区生成，测试与审核后再验收合入。</p><button class="primary" style="margin-top:15px" onclick="startDemo()">开始协作（演示）</button></div>
+<div id="plan" class="card hidden"><h3>模板计划示例 · 正式版按参与者生成</h3><p style="margin:12px 0">负责人拆解 → 实现参与者 ∥ 检查参与者 → 补丁审核与测试 → 负责人汇总</p><p class="small muted">编程产物先在独立工作区生成，测试与审核后再验收合入。</p><button class="primary" style="margin-top:15px" onclick="startDemo()">开始协作（演示）</button></div>
 </section>
 </main></div>
 <dialog id="modal"><div id="modal-content"></div><div style="margin-top:16px"><button class="plain" onclick="closeModal()">关闭</button></div></dialog>
@@ -73,6 +73,12 @@ function show(name){page=name;for(const id of ['board','detail','chat','create']
 function newWorkflow(){$('create-origin').textContent='新建独立协作任务；可以选择项目、参与者和负责人。';$('plan').classList.add('hidden');show('create')}
 function enterCollaboration(){modal('<h2>进入协作模式</h2><p>保留当前会话历史、项目与统计。先确认目标与分工，再开始协作。</p><div class="choices"><button onclick="closeModal();fromConversation()">用当前目标创建协作<small>生成可编辑计划；本次点击不发送请求</small></button><button onclick="closeModal();show(\'detail\')">查看已有协作<small>继续之前的任务，不重复创建或执行</small></button></div>')}
 function fromConversation(){$('create-origin').textContent='从当前会话进入协作：历史和会话 ID 保留，原独立任务需完成或中断后再派发。';$('plan').classList.add('hidden');show('create')}
+function addParticipant(agent='Codex',role='执行',model=''){
+ const card=document.createElement('div');card.className='card';card.style.padding='12px';
+ card.innerHTML='<div class="grid"><label>Agent<select class="participant-agent"><option>Codex</option><option>Claude Code</option><option>DeepSeek</option></select></label><label>职责<input class="participant-role" placeholder="规划 / 实现 / 审核"></label></div><div class="grid"><label>模型<input class="participant-model" placeholder="从 API 配置选择模型，或填写模型 ID"></label><label>思考强度<select><option>默认</option><option>低</option><option>中</option><option>高</option></select></label></div><button class="plain" onclick="this.parentElement.remove()">移除此参与者</button>';
+ card.querySelector('.participant-agent').value=agent;card.querySelector('.participant-role').value=role;card.querySelector('.participant-model').value=model;
+ $('participants').appendChild(card);
+}
 function plan(){if(!$('goal').value.trim()){toast('请填写协作目标');return}$('plan').classList.remove('hidden');$('plan').scrollIntoView({behavior:'smooth',block:'nearest'})}
 function startDemo(){const count=$('parallel').value;modal('<h2>计划已准备（示例）</h2><p>选择的并发上限：'+count+'。正式版将按依赖和资源调度任务；这里展示预置的两个并行任务。</p><button class="primary" onclick="closeModal();show(\'detail\')">查看协作详情</button>')}
 function togglePause(){paused=!paused;$('pause-button').textContent=paused?'恢复派发':'暂停派发';$('flow-banner').classList.toggle('hidden',!paused);$('flow-banner').textContent='已暂停派发 · 仍有 2 个任务运行。需要释放资源时，可在子任务中选择停止。';$('detail-state').textContent=paused?'不再派发新任务，已运行任务继续':'Codex 与 DeepSeek 正在并行执行';$('board-state').textContent=paused?'暂停派发':'执行中'}
@@ -82,7 +88,10 @@ function finishStop(agent){$('independent-agent').textContent=agent;backToChat(f
 function backToChat(keep,readAgent=true){if(readAgent)$('independent-agent').textContent=$('return-agent').value;background=keep;closeModal();$('chat-background').classList.toggle('hidden',!keep);$('handoff').classList.remove('hidden');show('chat')}
 const tasks={plan:['明确问题与验收标准','Claude Code','已完成','交付：计划与验收标准。'],baseline:['记录项目基线与工作区','Codex','已完成','交付：基线记录。'],code:['实现日志分层与进度界面','Codex','运行中','独立工作区 · 重任务名额 1/1 · 示例活动：正在构建。'],review:['核查错误处理与测试遗漏','DeepSeek','运行中','只读任务 · 正在整理问题；不会与实现任务交叉写入。'],test:['合并修改并运行回归测试','Codex','等待依赖','等待实现、审核完成以及重任务名额可用。'],deliver:['汇总结果，提交验收','Claude Code','等待依赖','等待测试结果，不把未完成修改当作已交付成果。']};
 function task(id){const t=tasks[id];modal('<h2>'+t[0]+'</h2><p><span class="badge">'+t[2]+'</span>　'+t[1]+'</p><p>'+t[3]+'</p><p class="small muted">流程、子任务与尝试均有独立编号；日志和用量可回溯。</p>'+(t[2]==='运行中'?'<button class="outline" onclick="toast(\'正式版会发送真实中断并等待退出；原型不改变进程\')">停止子任务</button>':'')+'<button class="plain" onclick="toast(\'正式版在当前详情展开实时活动，不自动跳到运行日志\')">展开活动</button>')}
-function settings(){modal('<h2>协作与资源管理</h2><p>默认 2 个执行任务，同一 Agent 同时 1 个，重任务同时 1 个。普通会话也计入总数。</p><label for="limit">并发上限</label><select id="limit"><option>1 · 顺序</option><option selected>2 · 默认</option><option>3 · 实验</option></select><p class="small muted">内存紧张时暂停新派发，运行任务由你选择是否中断。不会自动杀掉任务。原型不采集设备信息。</p><button class="primary" onclick="closeModal();toast(\'仅预览设置，尚未写入 App\')">完成</button>')}
+function settings(){modal('<h2>协作与资源管理</h2><p>默认 2 个执行任务，重任务同时 1 个。允许同一 Agent 的不同模型参与；能否同时执行取决于实例隔离能力。普通会话也计入总数。</p><label for="limit">并发上限</label><select id="limit"><option>1 · 顺序</option><option selected>2 · 默认</option><option>3 · 实验</option></select><p class="small muted">内存紧张时暂停新派发，运行任务由你选择是否中断。不会自动杀掉任务。原型不采集设备信息。</p><button class="primary" onclick="closeModal();toast(\'仅预览设置，尚未写入 App\')">完成</button>')}
+addParticipant('Codex','规划','示例模型 A');
+addParticipant('Codex','实现','示例模型 B');
+addParticipant('DeepSeek','审核','示例模型 C');
 show('board');
 </script>
 </body>

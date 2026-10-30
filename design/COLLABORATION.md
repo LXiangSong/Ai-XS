@@ -13,7 +13,7 @@
 | 项目 | 第一版决策 |
 | --- | --- |
 | 全局并行上限 | 默认 2，可选 1 / 2 / 3；作用于普通会话和协作子任务的总和 |
-| 单 Agent 并行 | 每个 Agent 同时一个执行任务；同一种 Agent 的其他任务排队 |
+| 单 Agent 并行 | 支持同一 Agent 建立多个独立参与者，分别选择模型；实例隔离验证前暂时顺序执行，验证后可在全局上限内并行 |
 | 重任务 | 同时最多 1 个；与普通任务一起计入全局并发 |
 | 环境 | 共用现有 Ubuntu、Node、Python、Git 和 Agent 安装 |
 | Agent 角色 | 用户指定，可互换，不按厂商固定能力或职责 |
@@ -41,6 +41,18 @@
 ### 新建协作
 
 表单顺序：目标 → 项目 / 工作目录 → 交付要求 → 模板 → 参与 Agent → 负责人 → 并行数。项目字段使用紧凑目录行；模型、思考强度和权限由每个参与者的设置面板配置。
+
+### 参与者：Agent、模型与角色分开配置
+
+参与者是一份独立执行配置：`participantId + Agent + 模型 + 思考强度 + 职责 + 权限`。界面使用“添加参与者”，允许多次选择同一个 Agent，也允许相同模型承担不同职责。负责人引用参与者 ID，而不是只引用 Agent 名称。
+
+例如全部使用 Codex：参与者一选当前 API 可用的模型 A 负责规划，参与者二选模型 B 负责实现，参与者三选模型 A 负责审核。也可混用 Claude Code、DeepSeek 与 Codex。模型列表取自该 Agent 的实际配置 / 发现结果，支持用户填写模型 ID；填写成功不代表协议、工具和思考参数一定兼容，运行前需做能力校验。不展示未经确认的固定模型名称或宣称任意模型跨 Agent 通用。
+
+同 Agent 多模型可以顺序执行，也可以在隔离验证通过后并行。不同模型名不会增加可用名额：默认全局仍最多两个运行任务，同一 API 网关的并发限制仍有效。工作区、设备控制、权限请求、提问、用量与日志均按参与者 / 尝试隔离。
+
+并行不能通过轮流修改全局模型或 provider 配置实现。每次尝试固定模型、思考参数、provider 配置版本和私有凭据引用。需要单独 provider 配置文件的 CLI 使用独立实例目录；共享安装程序和运行环境，不为每个参与者复制一套系统。Skills / 插件启用范围先沿用 Agent 配置并记录版本，后续再支持参与者级覆盖。
+
+当前 Codex Android 适配器的 `AppServer` 是单一进程对象，Claude / DeepSeek 也有共享缓存和配置路径。需增加 `workerId` 路由和实例池，或验证隔离会话的协议复用后，才能开放同 Agent 真并行。未完成适配时，界面明确显示“该 Agent 当前仅支持顺序执行”；计划仍允许多个参与者复用这个 Agent。
 
 参与者展示安装状态、启停状态、配置的 API 来源与协议、模型；密钥只显示是否已配置。缺失安装或必要配置时，标明原因并提供相应入口。被手动停止的 Agent 不被协作静默启用。
 
@@ -74,7 +86,7 @@
 
 如果仍有活动子任务，面板提供两种明确操作：
 
-- “转入后台，回到独立”：原协作保留运行；独立模式也受全局 2 名额和每 Agent 1 名额约束，无名额时排队。同一项目中，独立任务默认只读；只有使用另一个独立工作区，或等待相关写入锁释放后，才允许修改。非 Git 共享目录写入不与协作写入重叠。
+- “转入后台，回到独立”：原协作保留运行；独立模式也受全局 2 名额、Agent 执行实例能力和 API 上限约束，无名额时排队。同一项目中，独立任务默认只读；只有使用另一个独立工作区，或等待相关写入锁释放后，才允许修改。非 Git 共享目录写入不与协作写入重叠。
 - “中断任务，回到独立”：先暂停协作派发，向本协作的全部活动任务发送中断；确认退出并回收租约后再开始独立任务。已有成果保留，协作标记为中断待处理。
 
 没有活动任务时直接切换。切换前后的展示模式立刻变化不代表执行名额立刻释放；页面必须显示仍在运行 / 正在停止 / 排队的真实状态。取消模式面板不改变任何执行任务。
@@ -122,7 +134,7 @@ flowchart LR
 
 建立一个调度器统一接管普通对话和协作子任务。任何路径都不能绕过名额限制；普通消息可进入队列并在原会话显示排队原因。用户可提高优先级；同优先级按等待时间排序，避免一个协作独占全部名额。
 
-派发条件同时满足：依赖完成、流程允许派发、目标 Agent 已启用且空闲、全局有名额、重任务名额可用、资源信息新鲜、文件与设备锁可用、API 退避结束。
+派发条件同时满足：依赖完成、流程允许派发、目标 Agent 已启用且有隔离执行实例可用、参与者空闲、全局有名额、重任务名额可用、资源信息新鲜、文件与设备锁可用、API 退避结束。
 
 ```text
 候选任务
@@ -202,14 +214,15 @@ v1 不宣传硬内存隔离或绝对限制。PRoot / worktree 也不提供进程
 
 新增私有 SQLite 数据库 `collaboration/state.db`，保存在现有运行时 `.state` 下，使用事务和 schema 迁移。普通会话原文件保持兼容。
 
-主要表：`workflows`、`tasks`、`dependencies`、`attempts`、`events`、`artifacts`、`leases`、`resource_samples`。任务规格与运行状态分开；事件序号单调递增。数据库不写 API 密钥。
+主要表：`workflows`、`participants`、`tasks`、`dependencies`、`attempts`、`events`、`artifacts`、`leases`、`resource_samples`。任务规格与运行状态分开；事件序号单调递增。数据库不写 API 密钥。
 
 | 对象 | 核心字段 |
 | --- | --- |
 | 协作 | id, title, objective, project, ownerAgent, status, planVersion, createdAt |
 | 会话模式 | conversationId, displayMode, independentBinding, activeWorkflowId, contextRevision, pendingTransition |
-| 子任务 | id, workflowId, agent, model, goal, dependencies, workload, workspace, acceptance |
-| 尝试 | id, taskId, number, state, nativeThreadId, nativeTurnId, configRevision, startedAt, endedAt |
+| 参与者 | id, workflowId, agent, model, effort, role, permission, providerRef, configRevision |
+| 子任务 | id, workflowId, participantId, goal, dependencies, workload, workspace, acceptance |
+| 尝试 | id, taskId, participantId, workerId, number, state, nativeThreadId, nativeTurnId, configRevision, startedAt, endedAt |
 | 租约 | ownerAttempt, kind, key, processIdentity, acquiredAt, heartbeatAt |
 | 事件 | sequence, workflowId, taskId, attemptId, type, payload, timestamp |
 | 产物 | id, attemptId, relativePath, kind, hash, sourceRevision, reviewStatus |
@@ -236,7 +249,7 @@ native/collaboration/fromConversation, handoffToIndependent
 | 现有模块 | 调整 |
 | --- | --- |
 | `RuntimeManager.guest()` | 将硬编码 `AI_XS_SINGLE_AGENT=1` 替换为能力配置；不能仅删除变量让 Codex 开机常驻 |
-| `EngineManager` | 拆分“Agent 已启用”“任务调度”“进程回收”；受调度器管理时不再 `_activate()` 拒绝另一 Agent 或停止其进程 |
+| `EngineManager` / CLI 适配器 | 增加 workerId 路由与独立实例池；同 Agent 不同模型的上下文、配置、终止、权限及用量相互隔离；拆分“Agent 已启用”“任务调度”“进程回收”；受调度器管理时不再 `_activate()` 拒绝另一 Agent 或停止其进程 |
 | `SharedConversations` | 主会话 ID 保持；独立 binding、展示模式和协作关联分开；协作子任务各自建立独立会话，不共用 binding；全局调度覆盖创建 / 恢复 / 提交路径 |
 | `NativeHost` | 注册协作 RPC、持久化与全局调度；普通任务、MCP 创建任务也必须经过调度 |
 | `RuntimeService` | 资源采样、活动任务通知、恢复与终止回执；不能因为页面退出停止任务 |
@@ -258,9 +271,9 @@ native/collaboration/fromConversation, handoffToIndependent
 
 ### 阶段 B：原生协作工作台与可编辑计划
 
-完成列表、新建、计划、依赖执行、负责人汇总、子任务提问路由和用量统计，并支持当前会话双向切换。先支持只读资料 / 独立输出办公任务。
+完成参与者配置（允许重复选择同 Agent、不同模型）、实例隔离、同 Agent 并行能力验证、列表、新建、计划、依赖执行、负责人汇总、子任务提问路由和用量统计，并支持当前会话双向切换。先支持只读资料 / 独立输出办公任务。
 
-验收：计划可编辑、依赖不提前运行、两个同时提问分别回答、错误留在当前页、返工有上限、已停止 Agent 不被自动启用；独立 → 协作 → 独立后会话 ID / 历史 / 用量保留，后台任务不静默覆盖当前上下文，无名额时排队，有冲突锁时不允许共享目录写入。
+验收：同 Agent 不同模型同时运行时不互改配置，终止一个尝试不终止另一个，权限回答与用量能区分参与者；未支持的适配器明确顺序排队；计划可编辑、依赖不提前运行、两个同时提问分别回答、错误留在当前页、返工有上限、已停止 Agent 不被自动启用；独立 → 协作 → 独立后会话 ID / 历史 / 用量保留，后台任务不静默覆盖当前上下文，无名额时排队，有冲突锁时不允许共享目录写入。
 
 ### 阶段 C：编程工作区与审核交付
 
