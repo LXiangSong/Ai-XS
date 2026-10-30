@@ -27,6 +27,7 @@ public final class NativeToolsActivity extends androidx.appcompat.app.AppCompatA
     engine = getIntent().getStringExtra("engine");
     if (engine == null)
       engine = getSharedPreferences("native-chat", 0).getString("engine", "codex");
+    if (state != null) engine = state.getString("engine", engine);
     entryPage = getIntent().getStringExtra("page");
     if (entryPage == null) entryPage = "menu";
     getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
@@ -64,20 +65,31 @@ public final class NativeToolsActivity extends androidx.appcompat.app.AppCompatA
         .show();
   }
   private void back() {
+    if (currentPage.equals("mcp-tools")) { mcp(); return; }
     if (currentPage.equals(entryPage) || currentPage.equals("menu")) finish();
     else menu();
   }
   @Override protected void onSaveInstanceState(Bundle state) {
     super.onSaveInstanceState(state);
     state.putString("page",currentPage);
+    state.putString("engine",engine);
   }
   private void menu() {
     currentPage = "menu";
     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-    page("");
-    NativeUi.heading(this, body, "工具与扩展", "管理 MCP 连接、Skills 与插件。API、运行环境和手机诊断统一放在设置中。");
+    page("工具与扩展");
+    TextView intro = Ui.text(this,
+        "MCP 连接与扩展库在这里管理；API、运行环境、Agent 管理与日志在设置中。", 12.5f, Ui.muted, null);
+    intro.setLineSpacing(NativeUi.dp(this, 3), 1f);
+    LinearLayout.LayoutParams introSpace = new LinearLayout.LayoutParams(-1, -2);
+    introSpace.leftMargin = NativeUi.dp(this, 4);
+    introSpace.rightMargin = NativeUi.dp(this, 4);
+    body.addView(intro, introSpace);
+
+    NativeUi.section(this, body, "扩展能力");
     NativeUi.tile(this, body, R.drawable.ic_tools, "共享 MCP 工具", "连接工具服务器，查看可用能力", this::mcp);
     NativeUi.tile(this, body, R.drawable.ic_spark, "Skills 与插件", "GitHub 获取、本地导入与 Agent 分配", this::extensions);
+
   }
   private void api() {
     currentPage = "api";
@@ -338,42 +350,130 @@ public final class NativeToolsActivity extends androidx.appcompat.app.AppCompatA
   private void mcp() {
     currentPage = "mcp";
     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-    page("");
-    NativeUi.heading(this, body, "共享 MCP 工具", "三个 Agent 共用连接；正在运行的任务会在下次新建或恢复会话时加载变更。");
-    body.addView(NativeUi.outlinedButton(this, NativeUi.engineName(engine) + " ▾", () -> chooseAgent(this::mcp)));
-    body.addView(NativeUi.primaryButton(this, "添加 HTTP MCP", () -> mcpForm("", new JSONObject())));
-    NativeUi.gap(this, body, 8);
+    page("共享 MCP 工具");
+    TextView mcpIntro = Ui.text(this, "三个 Agent 共用连接；变更会在下次新建或恢复会话时加载。", 12.5f, Ui.muted, null);
+    mcpIntro.setLineSpacing(NativeUi.dp(this, 3), 1f);
+    LinearLayout.LayoutParams mcpIntroSpace = new LinearLayout.LayoutParams(-1, -2);
+    mcpIntroSpace.leftMargin = NativeUi.dp(this, 4);
+    mcpIntroSpace.rightMargin = NativeUi.dp(this, 4);
+    body.addView(mcpIntro, mcpIntroSpace);
+
+    NativeUi.section(this, body, "连接");
+    LinearLayout connect = Ui.group(body);
+    Ui.rowItem(connect, R.drawable.ic_spark, "当前 Agent",
+        NativeUi.engineName(engine) + " · 点击切换 Agent", () -> chooseAgent(this::mcp));
+    Ui.rowItem(connect, R.drawable.ic_tools, "添加 HTTP MCP", "连接远程工具服务器", () -> mcpForm("", new JSONObject()));
+
+    NativeUi.section(this, body, "服务");
+    final LinearLayout list = Ui.col(this);
+    body.addView(list);
+    LinearLayout loading = Ui.group(list);
+    LinearLayout loadingRow = Ui.row(this);
+    loadingRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+    Ui.pad(loadingRow, 14, 14, 14, 14);
+    loadingRow.addView(Ui.text(this, "正在读取 MCP 服务…", 12.5f, Ui.muted, null));
+    loading.addView(loadingRow);
+
     call("mcp/list", NativeUi.json("refresh", true), r -> {
-      JSONArray list = r.optJSONArray("data");
-      if (list == null)
+      if (isFinishing()) return;
+      list.removeAllViews();
+      JSONArray servers = r.optJSONArray("data");
+      if (servers == null || servers.length() == 0) {
+        LinearLayout empty = Ui.group(list);
+        LinearLayout box = Ui.col(this);
+        Ui.pad(box, 14, 14, 14, 14);
+        box.addView(Ui.text(this, "还没有 MCP 服务", 14, Ui.text, Ui.medium(this)));
+        TextView note = Ui.text(this, "添加 HTTP MCP 后，三个 Agent 会共用这个连接。", 12, Ui.muted, null);
+        note.setLineSpacing(NativeUi.dp(this, 3), 1f);
+        LinearLayout.LayoutParams noteSpace = new LinearLayout.LayoutParams(-1, -2);
+        noteSpace.topMargin = NativeUi.dp(this, 3);
+        box.addView(note, noteSpace);
+        empty.addView(box);
         return;
-      for (int i = 0; i < list.length(); i++) {
-        JSONObject entry = list.optJSONObject(i);
-        body.addView(NativeUi.text(this, entry.optString("name"), 18, NativeUi.ACCENT));
-        body.addView(NativeUi.body(this,
-            entry.optString("authStatus") + "\n"
-                + (entry.has("error") ? entry.optString("error")
-                                      : "工具数量："
-                            + (entry.optJSONObject("tools") == null ? 0 : entry.optJSONObject("tools").length()))));
-        JSONObject tools = entry.optJSONObject("tools");
-        if (tools != null)
-          body.addView(NativeUi.outlinedButton(this, "查看工具清单",
-              ()
-                  -> new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                      .setTitle(entry.optString("name"))
-                      .setMessage(tools.names() == null ? "暂无工具" : tools.names().toString())
-                      .setPositiveButton("关闭", null)
-                      .show()));
-        if (!entry.optString("name").equals("aixs-device"))
-          body.addView(NativeUi.outlinedButton(this, "修改连接", () -> call("mcp/config/read", NativeUi.json(), value -> {
-            JSONObject config = value.optJSONObject("config");
-            JSONObject servers = config == null ? null : config.optJSONObject("mcp_servers");
-            mcpForm(entry.optString("name"),
-                servers == null ? new JSONObject() : servers.optJSONObject(entry.optString("name")));
-          })));
-        NativeUi.gap(this, body, 10);
+      }
+      for (int i = 0; i < servers.length(); i++) {
+        JSONObject entry = servers.optJSONObject(i);
+        if (entry != null) mcpServerCard(list, entry);
       }
     });
+  }
+  private void mcpServerCard(LinearLayout list, JSONObject entry) {
+    final String serverName = entry.optString("name");
+    JSONObject tools = entry.optJSONObject("tools");
+    boolean error = entry.has("error");
+    String status = entry.optString("authStatus", "");
+    LinearLayout card = Ui.group(list);
+    LinearLayout box = Ui.col(this);
+    Ui.pad(box, 14, 12, 14, 10);
+    LinearLayout head = Ui.row(this);
+    head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+    TextView name = Ui.text(this, serverName, 15.5f, Ui.text, Ui.medium(this));
+    name.setSingleLine(true);
+    name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+    head.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+    TextView badge = Ui.text(this, error ? "异常" : status.isEmpty() ? "已连接" : status,
+        10.5f, error ? Ui.warn : Ui.onAccentSoft, Ui.medium(this));
+    Ui.pad(badge, 8, 4, 8, 4);
+    badge.setBackground(Ui.round(error ? Ui.cardHigh : Ui.accentSoft, 999));
+    LinearLayout.LayoutParams badgeSpace = new LinearLayout.LayoutParams(-2, -2);
+    badgeSpace.leftMargin = NativeUi.dp(this, 8);
+    head.addView(badge, badgeSpace);
+    box.addView(head);
+
+    int count = tools == null ? 0 : tools.length();
+    String detail = error ? entry.optString("error") : count + " 个工具 · 下次新建或恢复会话时加载";
+    TextView note = Ui.text(this, detail, 12, error ? Ui.warn : Ui.muted, null);
+    note.setLineSpacing(NativeUi.dp(this, 3), 1f);
+    LinearLayout.LayoutParams noteSpace = new LinearLayout.LayoutParams(-1, -2);
+    noteSpace.topMargin = NativeUi.dp(this, 4);
+    box.addView(note, noteSpace);
+
+    LinearLayout actions = Ui.row(this);
+    actions.setGravity(android.view.Gravity.CENTER_VERTICAL);
+    if (tools != null) {
+      TextView view = Ui.text(this, "查看工具清单", 12.5f, Ui.accent, Ui.medium(this));
+      Ui.pad(view, 0, 8, 18, 6);
+      Ui.touchable(view);
+      view.setOnClickListener(v -> mcpTools(entry));
+      actions.addView(view);
+    }
+    if (!"aixs-device".equals(serverName)) {
+      TextView edit = Ui.text(this, "修改连接", 12.5f, Ui.muted, Ui.medium(this));
+      Ui.pad(edit, 0, 8, 12, 6);
+      Ui.touchable(edit);
+      edit.setOnClickListener(v -> call("mcp/config/read", NativeUi.json(), value -> {
+        JSONObject config = value.optJSONObject("config");
+        JSONObject servers = config == null ? null : config.optJSONObject("mcp_servers");
+        mcpForm(serverName, servers == null ? new JSONObject() : servers.optJSONObject(serverName));
+      }));
+      actions.addView(edit);
+    }
+    if (actions.getChildCount() > 0) box.addView(actions);
+    card.addView(box);
+  }
+  private void mcpTools(JSONObject server) {
+    currentPage = "mcp-tools";
+    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+    String serverName = server.optString("name", "MCP 工具");
+    page(serverName + " · 工具");
+    JSONObject tools = server.optJSONObject("tools");
+    int count = tools == null ? 0 : tools.length();
+    TextView intro = Ui.text(this, count == 0 ? "这个服务暂未提供工具。"
+        : "共 " + count + " 个工具，来自 " + serverName + "。", 12.5f, Ui.muted, null);
+    LinearLayout.LayoutParams introSpace = new LinearLayout.LayoutParams(-1, -2);
+    introSpace.leftMargin = NativeUi.dp(this, 4);
+    introSpace.bottomMargin = NativeUi.dp(this, 6);
+    body.addView(intro, introSpace);
+    if (count == 0) return;
+    NativeUi.section(this, body, "工具");
+    LinearLayout group = Ui.group(body);
+    java.util.Iterator<String> keys = tools.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      JSONObject tool = tools.optJSONObject(key);
+      String detail = tool == null ? "" : tool.optString("description", "");
+      Ui.rowItem(group, R.drawable.ic_tools, key, detail, null);
+    }
   }
   private void mcpForm(String existing, JSONObject value) {
     if (value == null)

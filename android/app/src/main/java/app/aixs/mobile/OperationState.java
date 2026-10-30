@@ -5,6 +5,12 @@ import org.json.JSONObject;
 
 /** Persisted operation metadata; late output cannot overwrite a terminal result. */
 final class OperationState {
+  static boolean shouldDisplay(JSONObject state, String page, String dismissedId) {
+    String status = state.optString("status"), id = state.optString("id");
+    if (status.equals("running")) return true;
+    return (status.equals("completed") || status.equals("failed") || status.equals("interrupted"))
+        && state.optString("origin").equals(page) && !id.equals(dismissedId);
+  }
   static JSONObject start(String id, String action, String agent, String origin, String title, long now) throws Exception {
     return new JSONObject().put("id", id).put("action", action).put("agent", agent == null ? "" : agent)
         .put("origin", origin).put("title", title).put("message", title)

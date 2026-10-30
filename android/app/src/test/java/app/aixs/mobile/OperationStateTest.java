@@ -5,6 +5,17 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 public class OperationStateTest {
+  @Test public void restoredResultStaysOnItsOriginUntilExplicitlyDismissed() throws Exception {
+    JSONObject running = OperationState.start("op-result", "check", null, "environment", "检查", 100);
+    assertTrue(OperationState.shouldDisplay(running, "agents", "op-result"));
+    for (String status : new String[] {"completed", "failed", "interrupted"}) {
+      JSONObject restored = new JSONObject(OperationState.finish(running, status, "最终结果", 200).toString());
+      assertTrue(OperationState.shouldDisplay(restored, "environment", ""));
+      assertFalse(OperationState.shouldDisplay(restored, "agents", ""));
+      assertFalse(OperationState.shouldDisplay(restored, "environment", "op-result"));
+    }
+    assertFalse(OperationState.shouldDisplay(new JSONObject(), "environment", ""));
+  }
   @Test public void failureRetainsOriginAndCorrelationAcrossReload() throws Exception {
     JSONObject running = OperationState.start("op12", "agent-select", "claude", "agents", "切换版本", 100);
     JSONObject stage = OperationState.step(running, "正在恢复服务", 140);

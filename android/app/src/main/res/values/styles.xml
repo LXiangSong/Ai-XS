@@ -144,7 +144,7 @@
 
     <style name="Xs.Button.Primary" parent="Widget.Material3.Button">
         <item name="android:layout_width">match_parent</item>
-        <item name="android:minHeight">50dp</item>
+        <item name="android:minHeight">48dp</item>
         <item name="android:layout_marginVertical">5dp</item>
         <item name="android:textAllCaps">false</item>
         <item name="android:textSize">15sp</item>

@@ -98,6 +98,15 @@ final class Ui {
     return t;
   }
   static TextView meta(Context c, String value) { return text(c, value, 12, muted, null); }
+  /** Compact status capsule; padding keeps the label clear of the rounded edges. */
+  static TextView pill(Context c, CharSequence value, int fg, int bg) {
+    TextView t = text(c, value, 10.5f, fg, medium(c));
+    t.setGravity(Gravity.CENTER);
+    t.setPadding(dp(c, 12), dp(c, 5), dp(c, 12), dp(c, 5));
+    t.setBackground(round(bg, 999f));
+    return t;
+  }
+  static TextView pill(Context c, CharSequence value) { return pill(c, value, muted, cardHigh); }
   static TextView sectionLabel(Context c, String value) {
     TextView t = text(c, value, 11, faint, medium(c));
     t.setLetterSpacing(0.09f);

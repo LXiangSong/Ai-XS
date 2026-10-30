@@ -59,7 +59,7 @@ class NativeHost:
         self.maintenance=False
         self.maintenance_lock=threading.RLock()
         self.starting_tasks=0
-        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.8.7-alpha'})
+        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.8.8-alpha'})
 
     def dispatch(self, request, slot=None):
         ident=request.get('id')

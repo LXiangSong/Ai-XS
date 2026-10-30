@@ -103,7 +103,7 @@ public final class RuntimeService extends Service {
             backend = null;
           }
         }
-        if (!"start".equals(action) && !"stop".equals(action) && !"device-check".equals(action)
+        if (!"start".equals(action) && !"stop".equals(action) && !"check".equals(action) && !"device-check".equals(action)
             && !"agent-check".equals(action) && !"agents-start".equals(action) && !"agents-stop".equals(action) && backend != null && backend.isAlive())
           throw new IOException("请先在 Agent 管理中全部停止，再安装或修复环境");
         if ("stop".equals(action)) {
