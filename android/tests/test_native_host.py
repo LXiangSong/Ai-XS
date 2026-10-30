@@ -69,6 +69,51 @@ class NativeHostTests(unittest.TestCase):
     def result(self,method,params=None):
         message=self.call(method,params);self.assertNotIn('error',message,message);return message['result']
 
+    def test_individual_and_batch_lifecycle_with_persisted_disabled_state(self):
+        rejected=self.call('native/agents/control',{'action':'stop','target':'all'})
+        self.assertIn('确认',rejected['error'])
+        stopped=self.result('native/agents/control',{'action':'stop','target':'deepseek','confirmed':True})
+        self.assertTrue(stopped['ok'])
+        states={r['id']:r for r in self.result('native/agents/status')['data']}
+        self.assertFalse(states['deepseek']['enabled'])
+        self.assertTrue(states['claude']['enabled']);self.assertTrue(states['codex']['enabled'])
+        blocked=self.call('thread/start',{'engine':'deepseek','cwd':str(self.projects),'model':'test-model'})
+        self.assertIn('Agent 管理',blocked['error'])
+        self.stop_host();self.start_host()
+        states={r['id']:r for r in self.result('native/agents/status')['data']}
+        self.assertFalse(states['deepseek']['enabled'])
+        stopped=self.result('native/agents/control',{'action':'stop','target':'all','confirmed':True})
+        self.assertTrue(stopped['ok']);self.assertEqual(len(stopped['data']),3)
+        self.assertTrue(all(not r['enabled'] for r in self.result('native/agents/status')['data']))
+        started=self.result('native/agents/control',{'action':'start','target':'all'})
+        self.assertTrue(started['ok'],started)
+        states=self.result('native/agents/status')['data']
+        self.assertTrue(all(r['enabled'] for r in states))
+        self.assertTrue(all(not r['running'] for r in states),'Start all should keep idle processes lazy')
+
+    def test_targeted_stop_interrupts_only_its_own_live_task(self):
+        self.result('provider/save',{'engine':'claude','mode':'thirdparty','name':'Local',
+            'baseUrl':'https://gateway.invalid','protocol':'anthropic-messages','models':['test-model'],'key':'private-test'})
+        tid=self.result('native/chat/thread/start',{'engine':'claude','cwd':str(self.projects)})['thread']['id']
+        self.result('native/chat/turn/start',{'threadId':tid,'engine':'claude','input':[{'type':'text','text':'permission'}]})
+        approval=next((e for e in self.events if e.get('type')=='approval'),None)
+        while approval is None:
+            event=self.messages.get(timeout=5).get('event',{})
+            if event.get('type')=='approval':approval=event
+        result=self.result('native/agents/control',{'action':'stop','target':'deepseek','confirmed':True})
+        self.assertTrue(result['ok'])
+        states={r['id']:r for r in self.result('native/agents/status')['data']}
+        self.assertEqual(states['claude']['activeTasks'],1)
+        self.assertTrue(self.result('native/status')['approvals'])
+        result=self.result('native/agents/control',{'action':'stop','target':'claude','confirmed':True})
+        self.assertTrue(result['ok'])
+        states={r['id']:r for r in self.result('native/agents/status')['data']}
+        self.assertEqual(states['claude']['activeTasks'],0)
+        self.assertFalse(states['claude']['enabled'])
+        self.assertTrue(states['codex']['enabled'])
+        doc=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+        self.assertEqual(doc['turns'][-1]['status'],'interrupted')
+
     def test_edit_roundtrip_keeps_original_branch_for_each_adapter(self):
         for engine in ('codex','claude','deepseek'):
             with self.subTest(engine=engine):
@@ -372,7 +417,7 @@ class NativeHostTests(unittest.TestCase):
         from deepseek_bridge import DeepSeekBridge
         with patch.dict(os.environ, {'AI_XS_DEEPSEEK_COMMAND': json.dumps([str(self.folder/'missing-dsh')])}):
             bridge=DeepSeekBridge(type('App', (), {'_emit': lambda *args: None})(),self.folder/'missing-agent')
-            with self.assertRaisesRegex(RuntimeError, '设置 → Agent 安装 → DeepSeek'):
+            with self.assertRaisesRegex(RuntimeError, '设置 → Agent 管理 → DeepSeek'):
                 bridge.command(str(self.projects))
 
     def test_shared_projects_and_sessions_without_starting_codex(self):

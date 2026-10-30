@@ -17,7 +17,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   private LinearLayout body, operationCard;
   private TextView operationTitle, operationMessage;
   private ProgressBar operationProgress;
-  private Button operationLogs;
+  private Button operationLogs, allAgentsStart, allAgentsStop;
   private JSONObject pendingOperation;
   private String logChannel = "normal", logSource = "all", logOperation = "";
   private final java.util.Map<String, TextView> agentLabels = new java.util.HashMap<>();
@@ -33,7 +33,10 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   private String displayedLog = "";
   private final ExecutorService logReader = Executors.newSingleThreadExecutor();
   private final ExecutorService updateReader = Executors.newSingleThreadExecutor();
-  private boolean checkingAgents;
+  private boolean checkingAgents, readingAgentStatus;
+  private long agentStatusAt;
+  private final java.util.Map<String, JSONObject> agentStates = new java.util.HashMap<>();
+  private final java.util.Map<String, Button> agentStartButtons = new java.util.HashMap<>(), agentStopButtons = new java.util.HashMap<>();
   private String logFilter = "all", logQuery = "";
   private RuntimeManager manager;
   private String page = "settings", selectedAgent;
@@ -106,6 +109,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     summary = null;
     operationCard = null;
     agentLabels.clear();
+    allAgentsStart = null; allAgentsStop = null;
+    agentStartButtons.clear(); agentStopButtons.clear();
     logs = null;
     logScroll = null;
     logCount = null;
@@ -142,7 +147,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     NativeUi.tile(this, body, R.drawable.ic_cloud, "运行环境",
         manager.complete() ? "已就绪 · 可检查与修复" : manager.initialized() ? "基础系统已就绪 · 待补装组件" : "未初始化",
         () -> show("environment"));
-    NativeUi.tile(this, body, R.drawable.ic_spark, "Agent 安装", installedCount() + " / 3 已安装",
+    NativeUi.tile(this, body, R.drawable.ic_spark, "Agent 管理", installedCount() + " / 3 已安装 · 启停、更新与版本管理",
         () -> show("agents"));
 
     NativeUi.section(this, body, "能力");
@@ -156,8 +161,6 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     NativeUi.section(this, body, "维护");
     NativeUi.tile(this, body, R.drawable.ic_check, "检查 Agent 接口", "检查版本、模型与工具连接",
         () -> operate("agent-check", null));
-    NativeUi.tile(this, body, R.drawable.ic_stop, "停止 Agent 服务", busy() ? "当前可能有任务在运行" : "服务空闲",
-        this::confirmStop);
     NativeUi.tile(this, body, R.drawable.ic_spark, "Agent 更新", "检查 Codex、Claude Code、DeepSeek 最新版本",
         () -> checkAgentUpdates(null));
     NativeUi.tile(this, body, R.drawable.ic_check, "关于 Ai-XS", "版本信息、GitHub 项目与应用更新",
@@ -192,23 +195,92 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   }
 
   private void agentsPage() {
-    NativeUi.heading(this, body, "Agent 安装与更新",
-        "三个 Agent 共用环境。可检查官方最新版本，也可从 GitHub 或本地导入 Ai-XS ARM64 部署包，安装后保留会话、项目与 API 配置。");
+    NativeUi.heading(this, body, "Agent 管理", "管理安装、启停、更新与历史版本。三个 Agent 共用环境；启动后空闲就绪，任务进程按需运行。");
     statusView();
-    primaryButton("检查全部 Agent 更新", () -> checkAgentUpdates(null));
-
+    LinearLayout controls = Ui.row(this);
+    allAgentsStart = NativeUi.primaryButton(this, "全部启动", () -> controlAgent("start", "all"));
+    allAgentsStop = NativeUi.outlinedButton(this, "全部停止", () -> controlAgent("stop", "all"));
+    controls.addView(allAgentsStart, new LinearLayout.LayoutParams(0, -2, 1f));
+    controls.addView(allAgentsStop, new LinearLayout.LayoutParams(0, -2, 1f));
+    body.addView(controls);
+    textButton("检查全部 Agent 更新", () -> checkAgentUpdates(null));
     NativeUi.section(this, body, "Agent");
-    LinearLayout agents = Ui.group(body);
     for (String id : new String[] {"codex", "claude", "deepseek"}) {
-      LinearLayout row = Ui.rowItem(agents, R.drawable.ic_spark, agentName(id),
-          installed(id) ? manager.installed(id) + " · 点击管理" : "未安装 · 点击安装", () -> agentSheet(id));
-      agentLabels.put(id, (TextView) ((LinearLayout) row.getChildAt(1)).getChildAt(1));
+      LinearLayout card = Ui.group(body); Ui.pad(card, 14, 12, 14, 6);
+      card.addView(NativeUi.text(this, agentName(id), 18, NativeUi.TEXT));
+      TextView label = NativeUi.body(this, agentStateText(id)); card.addView(label); agentLabels.put(id, label);
+      LinearLayout actions = Ui.row(this);
+      Button start = NativeUi.textButton(this, "启动", () -> controlAgent("start", id));
+      start.setContentDescription("启动 " + agentName(id)); agentStartButtons.put(id, start);
+      Button stop = NativeUi.textButton(this, "停止", () -> controlAgent("stop", id));
+      stop.setContentDescription("停止 " + agentName(id)); agentStopButtons.put(id, stop);
+      Button manage = NativeUi.textButton(this, "安装/版本", () -> agentSheet(id));
+      manage.setContentDescription("管理 " + agentName(id));
+      for (Button action : new Button[] {start, stop, manage}) actions.addView(action, new LinearLayout.LayoutParams(0, -2, 1f));
+      card.addView(actions);
     }
-
     NativeUi.section(this, body, "诊断");
-    NativeUi.tile(this, body, R.drawable.ic_check, "检查 Agent 接口", "版本、模型与工具连接",
-        () -> operate("agent-check", null));
+    NativeUi.tile(this, body, R.drawable.ic_check, "检查 Agent 接口", "版本、模型与工具连接", () -> operate("agent-check", null));
     NativeUi.tile(this, body, R.drawable.ic_log, "运行日志", "普通事件与 Debug 诊断", this::openLogs);
+    agentStatusAt = 0;
+  }
+  private String agentStateText(String id) {
+    if (!installed(id)) return "未安装 · 请先安装";
+    JSONObject state = agentStates.get(id);
+    String status;
+    if (!NativeEngine.ready()) {
+      boolean enabled = true;
+      try { enabled = RuntimeManager.json(new File(manager.root, "opt/aixs/native/.state/engine-services.json")).optBoolean(id, true); }
+      catch (Exception ignored) {}
+      status = enabled ? "服务未启动" : "已停止";
+    }
+    else if (state == null) status = "正在读取状态…";
+    else if (!state.optBoolean("enabled", true)) status = "已停止";
+    else if (state.optString("state").equals("starting")) status = "正在启动";
+    else if (state.optString("state").equals("stopping")) status = "正在停止";
+    else if (state.optString("state").equals("error")) status = "异常 · " + state.optString("error");
+    else if (state.optInt("activeTasks") > 0) status = "运行中 · " + state.optInt("activeTasks") + " 个任务";
+    else status = "已启动 · 空闲就绪";
+    return manager.installed(id) + " · " + status;
+  }
+  private void readAgentStatus() {
+    if (!page.equals("agents") || !NativeEngine.ready() || readingAgentStatus || System.currentTimeMillis() - agentStatusAt < 1500) return;
+    readingAgentStatus = true; agentStatusAt = System.currentTimeMillis();
+    NativeEngine.call("native/agents/status", new JSONObject(), result -> {
+      readingAgentStatus = false;
+      org.json.JSONArray states = result.optJSONArray("data");
+      if (states != null) for (int i = 0; i < states.length(); i++) {
+        JSONObject state = states.optJSONObject(i); if (state != null) agentStates.put(state.optString("id"), state);
+      }
+      if (!isDestroyed()) updateAgentRows();
+    }, error -> { readingAgentStatus = false; });
+  }
+  private void updateAgentRows() {
+    boolean operating = busy() || pendingOperation != null;
+    if (allAgentsStart != null) allAgentsStart.setEnabled(!operating && installedCount() > 0);
+    if (allAgentsStop != null) allAgentsStop.setEnabled(!operating && NativeEngine.ready());
+    for (java.util.Map.Entry<String, TextView> entry : agentLabels.entrySet()) {
+      String id = entry.getKey(), label = agentStateText(id);
+      if (!label.contentEquals(entry.getValue().getText())) entry.getValue().setText(label);
+      agentStartButtons.get(id).setEnabled(!operating && installed(id));
+      agentStopButtons.get(id).setEnabled(!operating && installed(id) && NativeEngine.ready());
+    }
+  }
+  private void controlAgent(String action, String target) {
+    if (busy() || pendingOperation != null) { toast("已有操作正在进行，请等待完成"); return; }
+    if (action.equals("start") && !manager.complete()) { toast("请先在设置 → 运行环境中初始化"); return; }
+    if (action.equals("stop")) {
+      String name = target.equals("all") ? "全部 Agent" : agentName(target);
+      new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("停止" + name + "？")
+          .setMessage("将中断" + (target.equals("all") ? "所有" : name + " 的") + "运行中任务。项目、会话和 API 配置将保留。")
+          .setNegativeButton("取消", null).setPositiveButton("停止", (d, w) -> launchAgentControl(action, target)).show();
+    } else launchAgentControl(action, target);
+  }
+  private void launchAgentControl(String action, String target) {
+    launchOperation(new Intent(this, RuntimeService.class).putExtra("operation", "agents-" + action)
+        .putExtra("agent", target).putExtra("confirmed", action.equals("stop")));
+    agentStatusAt = 0;
+    updateAgentRows();
   }
 
   private void devicePage() {
@@ -518,15 +590,6 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   private void browserLog() {
     logChannel = "debug"; logSource = "browser"; logOperation = "";
     resetLogSnapshot(); show("logs");
-  }
-
-  private void confirmStop() {
-    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-        .setTitle("停止 Agent 服务？")
-        .setMessage(busy() ? "仍有任务在运行，停止会中断当前工作。" : "服务将停止，下次发送消息时会重新启动。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton("停止", (d, w) -> operate("stop", null))
-        .show();
   }
 
   private boolean busy() {
@@ -899,10 +962,8 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
       if (pendingOperation != null) showOperation(pendingOperation);
       if (summary != null && !state.contentEquals(summary.getText()))
         summary.setText(state);
-      for (java.util.Map.Entry<String, TextView> entry : agentLabels.entrySet()) {
-        String id = entry.getKey(), label = installed(id) ? manager.installed(id) + " · 点击管理" : "未安装 · 点击安装";
-        if (!label.contentEquals(entry.getValue().getText())) entry.getValue().setText(label);
-      }
+      updateAgentRows();
+      readAgentStatus();
       readLogs();
     } catch (Exception ignored) {
     }

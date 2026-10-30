@@ -88,10 +88,10 @@ class DeepSeekBridge(ClaudeBridge):
             if not isinstance(value,list) or not value or not all(isinstance(x,str) for x in value):
                 raise ValueError('AI_XS_DEEPSEEK_COMMAND 必须是 JSON 命令数组')
             if not shutil.which(value[0]):
-                raise RuntimeError('DeepSeek 尚未安装或启动程序已失效，请到设置 → Agent 安装 → DeepSeek 安装或重新导入部署包')
+                raise RuntimeError('DeepSeek 尚未安装或启动程序已失效，请到设置 → Agent 管理 → DeepSeek 安装或重新导入部署包')
             return value
         binary=shutil.which('dsh')
-        if not binary:raise RuntimeError('未找到 DeepSeek，请在设置 → Agent 安装中安装')
+        if not binary:raise RuntimeError('未找到 DeepSeek，请在设置 → Agent 管理中安装')
         return [binary]
 
     def _connect(self, cwd, callback=None, run=None):

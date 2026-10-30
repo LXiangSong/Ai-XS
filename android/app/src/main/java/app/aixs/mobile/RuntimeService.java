@@ -104,8 +104,8 @@ public final class RuntimeService extends Service {
           }
         }
         if (!"start".equals(action) && !"stop".equals(action) && !"device-check".equals(action)
-            && !"agent-check".equals(action) && backend != null && backend.isAlive())
-          throw new IOException("请先停止 Agent 服务，再安装或修复环境");
+            && !"agent-check".equals(action) && !"agents-start".equals(action) && !"agents-stop".equals(action) && backend != null && backend.isAlive())
+          throw new IOException("请先在 Agent 管理中全部停止，再安装或修复环境");
         if ("stop".equals(action)) {
           NativeEngine.fail("Agent 服务已停止");
           manager.stopBackend();
@@ -115,6 +115,8 @@ public final class RuntimeService extends Service {
             backend = null;
           }
           log("Agent 服务已停止，数据已保留");
+        } else if ("agents-start".equals(action) || "agents-stop".equals(action)) {
+          controlAgents(intent, action.equals("agents-start") ? "start" : "stop");
         } else if ("initialize".equals(action))
           manager.initialize();
         else if ("check".equals(action))
@@ -165,6 +167,8 @@ public final class RuntimeService extends Service {
     return START_NOT_STICKY;
   }
   private String label(String action) {
+    if ("agents-start".equals(action)) return "启动 Agent";
+    if ("agents-stop".equals(action)) return "停止 Agent";
     if ("initialize".equals(action))
       return "初始化 / 修复共享环境";
     if ("check".equals(action))
@@ -184,6 +188,43 @@ public final class RuntimeService extends Service {
     if ("agent-remove".equals(action))
       return "删除 Agent 旧版本";
     return "安装 Agent";
+  }
+  private void controlAgents(Intent intent, String action) throws Exception {
+    String target = intent.getStringExtra("agent");
+    if (target == null) target = "all";
+    if (!java.util.Arrays.asList("all", "codex", "claude", "deepseek").contains(target)) throw new IOException("未知 Agent");
+    org.json.JSONArray targets = new org.json.JSONArray();
+    for (String engine : new String[] {"codex", "claude", "deepseek"}) {
+      if (!target.equals("all") && !target.equals(engine)) continue;
+      if (action.equals("start") && manager.installed(engine).equals("未安装")) {
+        if (!target.equals("all")) throw new IOException("请先在 Agent 管理中安装 " + engine);
+        log(engine + " 未安装，已跳过"); continue;
+      }
+      targets.put(engine);
+    }
+    if (targets.length() == 0) throw new IOException("尚未安装 Agent，请先在 Agent 管理中安装");
+    startBackend();
+    log((action.equals("start") ? "正在启动 " : "正在停止 ") + (target.equals("all") ? "全部 Agent" : target));
+    JSONObject result = NativeEngine.request("native/agents/control", new JSONObject().put("action", action)
+        .put("target", target).put("targets", targets).put("confirmed", intent.getBooleanExtra("confirmed", false)))
+        .get(160, TimeUnit.SECONDS);
+    org.json.JSONArray entries = result.getJSONArray("data");
+    java.util.ArrayList<String> failures = new java.util.ArrayList<>();
+    for (int i = 0; i < entries.length(); i++) {
+      JSONObject entry = entries.getJSONObject(i);
+      String message = entry.optString("agent") + " · " + entry.optString("message");
+      log(message);
+      debug(entry.toString());
+      if (!entry.optString("status").equals("completed")) failures.add(message);
+    }
+    if (!failures.isEmpty()) throw new IOException(String.join("；", failures));
+    if (action.equals("stop") && target.equals("all")) {
+      NativeEngine.fail("全部 Agent 已停止，请在 Agent 管理中启动");
+      backend.destroy();
+      if (!backend.waitFor(8, TimeUnit.SECONDS)) { backend.destroyForcibly(); backend.waitFor(3, TimeUnit.SECONDS); }
+      backend = null;
+      log("全部 Agent 与共享服务已停止，项目、会话和 API 配置已保留");
+    }
   }
   private void checkDeviceTools() throws Exception {
     for (String method : new String[] {"initialize", "tools/list", "tools/call", "phone_screen", "phone_screenshot",

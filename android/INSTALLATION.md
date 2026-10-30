@@ -2,7 +2,7 @@
 
 Ai-XS 是独立原生 Android App，与 AI-Web 分开部署。测试版从 `android/app/build/outputs/apk/release/app-release.apk` 构建，保留本地签名身份覆盖安装。
 
-首次打开进入原生会话页。尚未初始化时会提示“去设置 / 稍后”；只有进入 **设置 → 运行环境** 并主动点击“初始化环境”，才开始下载和准备一套共享 ARM64 Linux 环境。完成后在 **设置 → Agent 安装** 按需安装 Codex、Claude Code、DeepSeek，再于 **设置 → API 服务配置** 为每个 Agent 配置官方 API 或第三方 API。
+首次打开进入原生会话页。尚未初始化时会提示“去设置 / 稍后”；只有进入 **设置 → 运行环境** 并主动点击“初始化环境”，才开始下载和准备一套共享 ARM64 Linux 环境。完成后在 **设置 → Agent 管理** 按需安装 Codex、Claude Code、DeepSeek，再于 **设置 → API 服务配置** 为每个 Agent 配置官方 API 或第三方 API。
 
 新配置不继承现有 Termux / AI-Web 的账户信息。服务端配置保存在 Ai-XS 私有目录；cooper-api 等第三方服务可在 Agent 对应页面填写 Base URL、协议、模型 ID 和密钥。
 

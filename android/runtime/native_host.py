@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import sys
 import threading
+import time
 
 import agent_core as core
 from shared_conversations import SharedConversations
@@ -58,7 +59,7 @@ class NativeHost:
         self.maintenance=False
         self.maintenance_lock=threading.RLock()
         self.starting_tasks=0
-        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.8.6-alpha'})
+        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.8.7-alpha'})
 
     def dispatch(self, request, slot=None):
         ident=request.get('id')
@@ -76,6 +77,10 @@ class NativeHost:
                         raise ValueError('仍有 Agent 任务在运行，请先结束任务再更新')
                     self.maintenance=True
                 result={'ready':True}
+            elif method=='native/agents/status':
+                result=core.ENGINES.status(probe=False)
+            elif method=='native/agents/control':
+                result=self.control_agents(params)
             elif method.startswith('native/extensions/'):
                 action=method.removeprefix('native/extensions/')
                 if action=='list':
@@ -121,6 +126,35 @@ class NativeHost:
             if starting:
                 with self.maintenance_lock:self.starting_tasks-=1
             (slot or self.slots).release()
+
+    def control_agents(self, params):
+        action=params.get('action');target=params.get('target')
+        if action not in ('start','stop'):raise ValueError('不支持的 Agent 操作')
+        if target not in ('all','codex','claude','deepseek'):raise ValueError('未知的 Agent')
+        if action=='stop' and params.get('confirmed') is not True:raise ValueError('请确认停止 Agent，运行中的任务将被中断')
+        requested=params.get('targets') if target=='all' else [target]
+        if requested is None:requested=['codex','claude','deepseek']
+        if not isinstance(requested,list) or not requested or any(e not in ('codex','claude','deepseek') for e in requested):
+            raise ValueError('Agent 列表无效')
+        results=[]
+        # Serialize with turn submission and environment maintenance. Existing
+        # work in unrelated Agents remains untouched by a targeted stop.
+        with self.maintenance_lock:
+            if self.maintenance:raise ValueError('正在维护 Agent，请稍后重试')
+            if self.starting_tasks:raise ValueError('正在提交任务，请稍后重试启停操作')
+            for engine in dict.fromkeys(requested):
+                try:
+                    job=core.ENGINES.action(engine,action,confirmed=params.get('confirmed') is True)['job']
+                    deadline=time.monotonic()+45
+                    while job['status'] in ('pending','running'):
+                        if time.monotonic()>deadline:raise TimeoutError('Agent 启停超时，请查看运行日志')
+                        time.sleep(.025)
+                        job=core.ENGINES.read_job(job['id'])['job']
+                    results.append({'agent':engine,'status':job['status'],'message':job.get('error') or
+                        ('已启动，空闲就绪；任务按需运行' if action=='start' else '已停止，项目与会话已保留'),'log':job.get('log',[])})
+                except Exception as error:
+                    results.append({'agent':engine,'status':'failed','message':str(error)})
+        return {'data':results,'ok':all(r['status']=='completed' for r in results)}
 
     def read_usage(self, params):
         if core.engine_for(params)=='codex':

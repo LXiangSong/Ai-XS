@@ -49,7 +49,7 @@ Ai-XS 与 AI-Web 完全分开，是包名 `app.aixs.mobile` 的独立原生 Andr
   不会默默只加载一部分并宣称可用。npm / DeepSeek 原生 bundle 仍由原生安装器管理。
   Agent 可使用内置 extensions_list / preview / import / install / configure 工具操作同一扩展库，
   下一次任务生效。安装不会执行仓库脚本。
-- 工具与扩展仅保留 MCP、Skills 与插件。API、环境、Agent 安装与手机诊断分别在设置管理。
+- 工具与扩展仅保留 MCP、Skills 与插件。API、环境、Agent 管理与手机诊断分别在设置管理。
   返回按钮和系统返回都保留实际页面层级，API 子页返回设置，日志返回进入前的页面。
 - 消息支持复制、Markdown 引用（追加到草稿，不自动发送）、编辑用户原文并重发。编辑保留附件，
   使用当前 Agent 的全新私有上下文，原来的后续保留为“编辑前”分支，已执行的文件操作不回滚。
@@ -158,7 +158,7 @@ Codex 模型思考选项从能力目录读取，支持的模型显示极高、MA
 
 Claude Code 自行追加 /v1/messages，传给它的 ANTHROPIC_BASE_URL 自动去除重复的末尾 /v1，
 支持第三方页面填根地址或版本地址，原保存值不变；不影响 Codex 与 DeepSeek。
-Claude 未安装时明确引导到 Agent 安装，避免直接显示 subprocess ENOENT。
+Claude 未安装时明确引导到 Agent 管理，避免直接显示 subprocess ENOENT。
 
 ### 实时任务状态（0.8.2-alpha）
 

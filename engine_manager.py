@@ -67,13 +67,13 @@ class EngineManager:
         return value
 
     def _update_plan(self, engine):
-        return 'Ai-XS 设置 → Agent 安装',None
+        return 'Ai-XS 设置 → Agent 管理',None
 
-    def status(self, refresh=False):
+    def status(self, refresh=False, probe=True):
         with self.lock:
             result=[]
             for engine,name in [('codex','Codex'),*[(key,{'claude':'Claude Code','deepseek':'DeepSeek'}[key]) for key in self.bridges]]:
-                version=self._version(engine,refresh)
+                version=self._version(engine,refresh) if probe else self.versions.get(engine,{}).get('value',{})
                 source,plan=self._update_plan(engine)
                 process=self.app.process if engine=='codex' else None
                 alive=bool(process and process.poll() is None)
@@ -92,12 +92,12 @@ class EngineManager:
         self._validate(engine)
         with self.lock:
             if engine in self.busy:raise RuntimeError('该助手正在执行管理操作，请稍后重试')
-            if not self.enabled[engine]:raise RuntimeError('该助手已关闭，请在“助手管理”中启动')
+            if not self.enabled[engine]:raise RuntimeError('该助手已关闭，请在“Agent 管理”中启动')
             # Browsing another agent (model list, thread list, thread read) must not
             # tear down the running Codex process.  Only a real turn switches the
             # single active runtime; Codex itself still has to be started when read.
             if self.single_agent and (engine == 'codex' or activate):self._activate(engine)
-            if engine=='codex' and (not self.app.process or self.app.process.poll() is not None):raise RuntimeError('Codex 已退出，请在“助手管理”中重新启动')
+            if engine=='codex' and (not self.app.process or self.app.process.poll() is not None):raise RuntimeError('Codex 已退出，请在“Agent 管理”中重新启动')
 
     def _activate(self, engine):
         """Single-runtime mobile mode: release idle agents, never interrupt work."""
@@ -126,7 +126,7 @@ class EngineManager:
         with self.lock:
             if self.closing:raise RuntimeError('工作台正在关闭')
             if engine in self.busy:raise ValueError('该助手已有操作在进行中')
-            if self.single_agent:
+            if self.single_agent and action=='update':
                 for other in self.enabled:
                     if other == engine:continue
                     active = self.app.active_turns if other == 'codex' else self.bridges[other].runs
@@ -184,8 +184,12 @@ class EngineManager:
             if action=='start':
                 self._log(job,'正在启动 '+engine)
                 if self.single_agent:
-                    with self.lock:self._activate(engine)
-                if engine=='codex':self.app.start()
+                    # Mobile start enables a verified CLI. It does not eagerly
+                    # allocate three runtimes or interrupt another Agent's work.
+                    version=self._version(engine,True)
+                    if not version.get('available'):raise RuntimeError(version.get('error') or 'Agent 尚未安装')
+                    self._log(job,'已启动，空闲就绪；发送任务时按需运行')
+                elif engine=='codex':self.app.start()
                 else:
                     self.bridges[engine].status_cache=None;self.bridges[engine].models=None;self.bridges[engine].model_list()
                 with self.lock:

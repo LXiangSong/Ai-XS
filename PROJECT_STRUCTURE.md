@@ -6,7 +6,7 @@ Ai-XS 是独立原生 Android App，不依赖 AI-Web 服务或网页前端。
 | --- | --- |
 | `android/app/src/main/java/app/aixs/mobile` | 原生 Material 界面、手机工具、Linux 进程管理、App / Agent 更新 |
 | `NativeHomeActivity` / `ConversationRenderer` | 会话、输入、流式事件和消息显示 |
-| `RuntimeActivity` / `AboutActivity` | 设置、环境初始化、Agent 安装更新、关于与应用更新 |
+| `RuntimeActivity` / `AboutActivity` | 设置、环境初始化、Agent 管理（安装、启停与更新）、关于与应用更新 |
 | `NativeToolsActivity` / `ExtensionsActivity` | API、MCP 和共享扩展库 |
 | `NativeEngine` | Android 与 Linux 后端之间的私有 stdin/stdout 通信 |
 | `RuntimeService` / `RuntimeManager` | 共享 Linux 环境、Agent 部署与服务生命周期 |
