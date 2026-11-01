@@ -1,0 +1,508 @@
+{
+  "scope": "Codex installed schema notifications: every variant explicitly classified; adapted does not mean every remote backend has been tested. Claude and DSH coverage described in AGENT_PROTOCOL_AUDIT.md.",
+  "notifications": [
+    {
+      "method": "error",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "thread/started",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "thread/status/changed",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "thread/readState/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/archived",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/deleted",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/unarchived",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/closed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/reverted",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "skills/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/name/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/attachment/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/goal/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/prediction/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/goal/cleared",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/queue/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "project/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/project/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/environment/connected",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/environment/disconnected",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/settings/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "turn/started",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "hook/started",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "turn/completed",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "hook/completed",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "turn/diff/updated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "turn/plan/updated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/started",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/autoApprovalReview/started",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/autoApprovalReview/completed",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "autoApprovalReview/strictReviewRequired",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/completed",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/plan/delta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "command/exec/outputDelta",
+      "classification": "独立外部进程 API；Agent 工具执行通过 item/commandExecution/* 处理",
+      "implementationOrReason": "当前没有发起该原生外部进程 API"
+    },
+    {
+      "method": "process/outputDelta",
+      "classification": "独立外部进程 API；Agent 工具执行通过 item/commandExecution/* 处理",
+      "implementationOrReason": "当前没有发起该原生外部进程 API"
+    },
+    {
+      "method": "process/exited",
+      "classification": "独立外部进程 API；Agent 工具执行通过 item/commandExecution/* 处理",
+      "implementationOrReason": "当前没有发起该原生外部进程 API"
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/commandExecution/terminalInteraction",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/fileChange/outputDelta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/fileChange/patchUpdated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "serverRequest/resolved",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/mcpToolCall/progress",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "mcpServer/oauthLogin/completed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "mcpServer/event/stream/notification",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "account/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "account/gatewayOAuth/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "account/rateLimits/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "app/list/updated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "remoteControl/status/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "externalAgentConfig/import/progress",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "externalAgentConfig/import/completed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "fs/changed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "item/reasoning/summaryTextDelta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/reasoning/summaryPartAdded",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "item/reasoning/textDelta",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "thread/compacted",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "model/rerouted",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "model/verification",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "modelProvider/authRecoveryStarted",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "modelProvider/authRecoveryCompleted",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "turn/moderationMetadata",
+      "classification": "内部审核元数据；用户可见审核状态由 model/safetyBuffering/updated 显示",
+      "implementationOrReason": "不将内部元数据当正文输出"
+    },
+    {
+      "method": "model/safetyBuffering/updated",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "warning",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "guardianWarning",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "deprecationNotice",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "configWarning",
+      "classification": "适配会话运行事件",
+      "implementationOrReason": "agent_core.py / shared_conversations.py / realtime_events.py / RealtimeEvents.java"
+    },
+    {
+      "method": "fuzzyFileSearch/sessionUpdated",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "fuzzyFileSearch/sessionCompleted",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    },
+    {
+      "method": "thread/realtime/started",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/itemAdded",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/item/started",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/item/transcript/delta",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/item/completed",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/transcript/delta",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/transcript/done",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/outputAudio/delta",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/sdp",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/error",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "thread/realtime/closed",
+      "classification": "当前产品没有启动原生语音/RTC 会话；不冒充聊天 SSE",
+      "implementationOrReason": "未调用 thread/realtime/start"
+    },
+    {
+      "method": "windows/worldWritableWarning",
+      "classification": "Android 不启动 Windows Sandbox",
+      "implementationOrReason": "平台不适用"
+    },
+    {
+      "method": "windowsSandbox/setupCompleted",
+      "classification": "Android 不启动 Windows Sandbox",
+      "implementationOrReason": "平台不适用"
+    },
+    {
+      "method": "account/login/completed",
+      "classification": "原生管理通知；不属于本次聊天操作流，不能算作已验证的独立产品能力",
+      "implementationOrReason": "保留原通知供诊断；会话/账户/插件管理采用 App 自有接口"
+    }
+  ],
+  "threadItems": [
+    {
+      "type": "userMessage",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "hookPrompt",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "agentMessage",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "functionCallOutput",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "plan",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "reasoning",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "commandExecution",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "fileChange",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "mcpToolCall",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "dynamicToolCall",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "collabAgentToolCall",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "subAgentActivity",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "webSearch",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "imageView",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "sleep",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "imageGeneration",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "enteredReviewMode",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "exitedReviewMode",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    },
+    {
+      "type": "contextCompaction",
+      "implementation": "RealtimeEvents.java / ConversationContent.java; item lifecycle retained by both Python reducers"
+    }
+  ]
+}

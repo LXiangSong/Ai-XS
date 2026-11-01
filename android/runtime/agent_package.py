@@ -17,6 +17,16 @@ import zipfile
 
 AGENTS = {'codex':('codex','@openai/codex'), 'claude':('claude','@anthropic-ai/claude-code-linux-arm64'), 'deepseek':('dsh','@deepseek-ai/dsh')}
 MAX_BYTES = 2 * 1024**3
+REGISTRY = 'https://registry.npmmirror.com'
+
+
+def native_tarball_url(url):
+    parsed=urllib.parse.urlsplit(url)
+    if parsed.scheme!='https' or parsed.netloc not in ('registry.npmjs.org','registry.npmmirror.com','cdn.npmmirror.com'):
+        raise ValueError('原生包下载来源无效')
+    # Older metadata may still contain the upstream URL. Fetch the same package path from the mirror.
+    if parsed.netloc=='registry.npmjs.org':return urllib.parse.urlunsplit(('https','registry.npmmirror.com',parsed.path,parsed.query,''))
+    return url
 
 
 def validate(agent, version):
@@ -122,12 +132,12 @@ def remove_version(base, agent, release_id):
 
 def install_claude_native(stage, version):
     package=AGENTS['claude'][1]
-    metadata='https://registry.npmjs.org/'+urllib.parse.quote(package,safe='')+'/'+version
+    metadata=REGISTRY+'/'+urllib.parse.quote(package,safe='')+'/'+version
     with urllib.request.urlopen(metadata,timeout=30) as response:
         document=json.loads(response.read(1024*1024))
-    dist=document['dist'];url=dist['tarball'];integrity=dist['integrity']
-    if not url.startswith('https://registry.npmjs.org/') or not integrity.startswith('sha512-'):
-        raise ValueError('官方原生包下载来源或校验值无效')
+    dist=document['dist'];url=native_tarball_url(dist['tarball']);integrity=dist['integrity']
+    if not integrity.startswith('sha512-'):
+        raise ValueError('原生包校验值无效')
     archive=stage/'native.tgz'
     subprocess.run(['curl','-fL','--connect-timeout','20','--max-time','900','--retry','2','--speed-limit','1024','--speed-time','90','-o',str(archive),url],check=True,timeout=1100)
     with archive.open('rb') as source:actual=base64.b64encode(hashlib.file_digest(source,'sha512').digest()).decode()
@@ -153,6 +163,7 @@ def populate_prefix(stage, agent, version):
     if agent=='claude':install_claude_native(stage,version)
     else:
         subprocess.run(['npm','install','--global','--prefix',str(stage),'--no-audit','--no-fund','--maxsockets=2',
+            '--registry='+REGISTRY,
             '--fetch-retries=2','--fetch-timeout=300000','--loglevel=http',AGENTS[agent][1]+'@'+version],check=True,timeout=1200)
     check(stage,agent,version)
 

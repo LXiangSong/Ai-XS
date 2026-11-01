@@ -38,7 +38,9 @@ public final class RuntimeManager {
     return new File(runtime, "ready").isFile();
   }
   public boolean complete() {
-    return new File(runtime, "complete").isFile();
+    if(!new File(runtime,"complete").isFile())return false;
+    try{return json(new File(runtime,"health-report.json")).optBoolean("runtimeHealthy",true);}
+    catch(Exception ignored){return true;}
   }
   public String installed(String agent) {
     try {
@@ -103,9 +105,10 @@ public final class RuntimeManager {
   public List<String> guest(String... args) {
     String lib = context.getApplicationInfo().nativeLibraryDir;
     List<String> command = new ArrayList<>(Arrays.asList(lib + "/libproot.so", "--kill-on-exit", "--link2symlink", "-0",
-        "-r", root.getAbsolutePath(), "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/", "/usr/bin/env", "-i",
+        "-r", root.getAbsolutePath(), "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/urandom:/dev/random", "-w", "/", "/usr/bin/env", "-i",
         "HOME=/root", "PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8", "TMPDIR=/tmp",
         "NODE_OPTIONS=--max-old-space-size=1024", "UV_THREADPOOL_SIZE=2", "AI_XS_SINGLE_AGENT=1",
+        "npm_config_registry="+RuntimeSources.NPM, "npm_config_disturl="+RuntimeSources.NODE_MIRRORS[0],
         "CODEX_ZH_PROJECTS=/root/projects", "AI_XS_CLAUDE_COMMAND=[\"/usr/local/bin/claude\"]",
         "AI_XS_DEEPSEEK_COMMAND=[\"/usr/local/bin/dsh\"]"));
     try {
@@ -118,41 +121,64 @@ public final class RuntimeManager {
     return command;
   }
   public String run(List<String> command, boolean guest, int timeout) throws Exception {
-    ProcessBuilder builder = guest ? process(command) : new ProcessBuilder(command);
-    builder.redirectErrorStream(true);
-    long began = System.currentTimeMillis();
-    debugLogger.accept("启动子进程 · " + (guest ? "共享环境" : "Android") + " · 超时 " + timeout + "s");
-    Process child = builder.start();
-    ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
-    java.util.concurrent.atomic.AtomicBoolean timedOut = new java.util.concurrent.atomic.AtomicBoolean();
-    ScheduledFuture<?> expiry = timer.schedule(() -> { timedOut.set(true); child.destroyForcibly(); }, timeout, TimeUnit.SECONDS);
-    StringBuilder tail = new StringBuilder();
-    try (BufferedReader reader =
-             new BufferedReader(new InputStreamReader(child.getInputStream(), StandardCharsets.UTF_8))) {
-      String line;
-      while ((line = reader.readLine()) != null) {
-        if (line.length() > 2000)
-          line = line.substring(0, 2000);
-        debugLogger.accept(line);
-        if (line.startsWith("AIXS_PROGRESS: ")) log(line.substring(15));
-        tail.append(line).append('\n');
-        if (tail.length() > 4000)
-          tail.delete(0, tail.length() - 4000);
-      }
-    } catch (IOException error) {
-      child.destroyForcibly();
-      if (timedOut.get()) throw new IOException("命令执行超时（" + timeout + " 秒）", error);
-      throw error;
-    } finally {
-      expiry.cancel(false);
-      timer.shutdownNow();
+    return runStep("运行环境命令", command, guest, timeout);
+  }
+  private String runStep(String stage, List<String> command, boolean guest, int timeout) throws Exception {
+    debugLogger.accept(stage + " · 启动子进程 · " + (guest ? "共享环境" : "Android") + " · 超时 " + timeout + "s");
+    // Commands can contain credentials for Agent operations; print only explicit probe commands below.
+    return RuntimeCommand.run(guest ? process(command) : new ProcessBuilder(command), stage, timeout,
+        line -> { debugLogger.accept(line); if (line.startsWith("AIXS_PROGRESS: ")) log(line.substring(15)); }, debugLogger);
+  }
+  private void configureDns() throws Exception {
+    // Use the active Android network's DNS. Existing user DNS wins unless it is our legacy default.
+    File file=new File(root,"etc/resolv.conf");String previous=RuntimeFiles.read(file);
+    File managed=new File(runtime,"managed-dns.txt");
+    if(!previous.trim().isEmpty() && !previous.equals("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+        && !previous.equals(RuntimeSources.FALLBACK_DNS) && !previous.equals(RuntimeFiles.read(managed)))return;
+    android.net.ConnectivityManager connectivity=(android.net.ConnectivityManager)context.getSystemService(Context.CONNECTIVITY_SERVICE);
+    android.net.Network active=connectivity==null?null:connectivity.getActiveNetwork();
+    android.net.LinkProperties link=active==null?null:connectivity.getLinkProperties(active);
+    StringBuilder dns=new StringBuilder();
+    if(link!=null)for(InetAddress address:link.getDnsServers()) {
+      String ip=address.getHostAddress();if(ip!=null && !ip.contains("%"))dns.append("nameserver ").append(ip).append('\n');
     }
-    int exit = child.waitFor();
-    debugLogger.accept("子进程结束 · exit=" + exit + " · 耗时 " + (System.currentTimeMillis() - began) + "ms");
-    if (timedOut.get()) throw new IOException("命令执行超时（" + timeout + " 秒）");
-    if (exit != 0)
-      throw new IOException("命令执行失败（退出码 " + exit + "），详情见 Debug 日志");
-    return tail.toString();
+    if(dns.length()==0)dns.append(RuntimeSources.FALLBACK_DNS);
+    write(file,dns.toString());write(managed,dns.toString());debugLogger.accept("共享环境 DNS：\n"+dns);
+  }
+  private List<File> aptSourceFiles() {
+    List<File> sources=new ArrayList<>();sources.add(new File(root,"etc/apt/sources.list"));
+    File[] extra=new File(root,"etc/apt/sources.list.d").listFiles();
+    if(extra!=null)for(File file:extra)if(file.getName().endsWith(".sources")||file.getName().endsWith(".list"))sources.add(file);
+    return sources;
+  }
+  private void configureAptSources(String mirror) throws Exception {
+    for(File file:aptSourceFiles())if(file.isFile()) {
+      String previous=RuntimeFiles.read(file),next=RuntimeSources.rewriteApt(previous,mirror);
+      if(!previous.equals(next)) {
+        File backup=new File(runtime,"source-backups/"+root.toPath().relativize(file.toPath())+".aixs-backup");
+        if(!backup.exists())write(backup,previous);
+        write(file,next);
+      }
+      debugLogger.accept("APT 配置 "+file.getName()+"：\n"+next);
+    }
+    log("Ubuntu ARM64 下载源："+mirror);
+    write(new File(runtime,"download-sources.json"),new JSONObject().put("apt",mirror).put("npm",RuntimeSources.NPM)
+        .put("node",new org.json.JSONArray(Arrays.asList(RuntimeSources.NODE_MIRRORS))).toString(2));
+  }
+  private void downloadDependencies(boolean reinstall) throws Exception {
+    Exception primary=null;
+    for(String mirror:RuntimeSources.APT_MIRRORS) {
+      configureAptSources(mirror);
+      try {
+        log("更新软件源索引…");runStep("更新 Ubuntu 软件源索引 · "+mirror,guest("/bin/sh","-ec",RuntimePackages.update()),true,180);
+        log("下载基础依赖…");runStep("下载基础依赖 · "+mirror,guest("/bin/sh","-ec",RuntimePackages.download(reinstall)),true,300);
+        return;
+      }catch(Exception error) {
+        if(Thread.currentThread().isInterrupted())throw error;
+        if(primary==null){primary=error;log("首选国内源失败，切换备用国内源。失败详情已记录。");debugLogger.accept(error.toString());}
+        else {IOException failure=new IOException("两个国内 Ubuntu 源均未完成下载；请查看各源的 DNS、连接、索引或下载错误。\n首选源："+primary+"\n备用源："+error,error);failure.addSuppressed(primary);throw failure;}
+      }
+    }
   }
   public void initialize() throws Exception {
     if (!Arrays.asList(Build.SUPPORTED_ABIS).contains("arm64-v8a"))
@@ -207,48 +233,111 @@ public final class RuntimeManager {
         throw new IOException("无法启用共享环境");
       archive.delete();
       new File(root, "tmp").mkdirs();
-      write(new File(root, "etc/resolv.conf"), "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+      write(new File(root, "etc/resolv.conf"), RuntimeSources.FALLBACK_DNS);
       write(new File(runtime, "ready"), "1\n");
     } else
       log("复用已有环境，保留 Agent、配置、历史和项目。");
-    log("检查和补装共享 Python、Git、TLS 与下载工具…");
-    run(guest("/bin/sh", "-ec",
-            "export DEBIAN_FRONTEND=noninteractive; if ! (command -v python3 && command -v git && command -v curl && "
-            + "command -v xz && test -s /etc/ssl/certs/ca-certificates.crt) >/dev/null 2>&1; then apt-get -o "
-            + "APT::Sandbox::User=root -o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::http::Timeout=30 "
-            + "update; apt-get -o APT::Sandbox::User=root -o Acquire::Retries=2 install -y --no-install-recommends "
-            + "python3 git curl xz-utils ca-certificates; fi; python3 --version; git --version"),
-        true, 1200);
-    JSONObject node = assetJson("runtime/catalog.json").getJSONObject("node");
-    String version = node.getString("version"), sha = node.getString("sha256");
-    if (!version.matches("v[0-9.]+") || !sha.matches("[0-9a-f]{64}"))
-      throw new IOException("Node 安装目录信息无效");
-    log("检查共享 Node.js " + version + "…");
-    String nodeName = "node-" + version + "-linux-arm64";
-    run(guest("/bin/sh", "-ec",
-            "if test -x /opt/node/bin/node && test \"$(/opt/node/bin/node --version)\" = " + version
-                + ("; then /opt/node/bin/node --version; exit 0; fi; mkdir -p /opt; curl -fL --connect-timeout 20 "
-                   + "--max-time 600 --retry 2 -o /tmp/node.tar.xz https://nodejs.org/dist/")
-                + version + "/" + nodeName + ".tar.xz; echo '" + sha
-                + "  /tmp/node.tar.xz' | sha256sum -c -; tar -xJf /tmp/node.tar.xz -C /opt; ln -sfn " + nodeName
-                + (" /opt/node.new; mv -Tf /opt/node.new /opt/node; rm -f /tmp/node.tar.xz; /opt/node/bin/node "
-                   + "--version; /opt/node/bin/npm --version")),
-        true, 1200);
-    deployTools();
-    run(guest("/bin/sh", "-ec", "apt-get clean; rm -rf /var/lib/apt/lists/*"), true, 60);
-    check();
-    write(new File(runtime, "complete"), "1\n");
-    log("初始化完成。三个 Agent 共用这一份环境。");
+    java.nio.file.Files.deleteIfExists(new File(runtime,"complete").toPath());
+    configureDns();
+    configureAptSources(RuntimeSources.APT_MIRRORS[0]);
+    // A file existing does not prove the previous install finished successfully.
+    String pending=runStep("检查软件包配置状态",guest("/usr/bin/dpkg","--audit"),true,15);
+    if(!pending.isEmpty()) {
+      log("发现未完成的软件包配置；先恢复并记录具体配置步骤…");
+      runStep("恢复未完成的软件包配置",guest("/bin/sh","-ec",RuntimePackages.recover()),true,120);
+    }
+    boolean healthy=true;
+    try {
+      runStep("检查基础依赖运行",guest("/bin/sh","-ec",
+          "python3 -I -c 'import ssl,sqlite3,ctypes; print(ssl.OPENSSL_VERSION)'; git --version; curl --version; xz --version; test -s /etc/ssl/certs/ca-certificates.crt"),true,30);
+    }catch(Exception error){healthy=false;debugLogger.accept("基础依赖需要补装／修复："+error);}
+    if(!healthy) {
+      downloadDependencies(false);
+      log("配置基础依赖，日志将记录具体软件包…");
+      runStep("解包与配置基础依赖",guest("/bin/sh","-ec",RuntimePackages.install()),true,300);
+      try{runStep("验证已安装依赖",guest("/usr/bin/python3","-I","-c","import ssl,sqlite3,ctypes; print('PYTHON_IMPORT_OK')"),true,20);}
+      catch(Exception error){
+        log("依赖安装后仍无法运行，重新安装程序与标准库…");
+        downloadDependencies(true);
+        runStep("重新安装损坏依赖",guest("/bin/sh","-ec",RuntimePackages.reinstall()),true,300);
+      }
+    } else log("Python、Git、TLS、curl 与 xz 可运行，跳过依赖安装。");
+    JSONObject node=assetJson("runtime/catalog.json").getJSONObject("node");
+    String version=node.getString("version"),sha=node.getString("sha256");
+    if(!version.matches("v[0-9.]+")||!sha.matches("[0-9a-f]{64}"))throw new IOException("Node 安装版本信息无效");
+    boolean nodeReady=true;
+    try{runStep("检查 Node.js 与 npm",guest("/bin/sh","-ec","test \"$(/opt/node/bin/node --version)\" = "+version+"; /opt/node/bin/npm --version"),true,25);}
+    catch(Exception error){nodeReady=false;debugLogger.accept("Node.js／npm 需要安装或修复："+error);}
+    if(!nodeReady) {
+      String name="node-"+version+"-linux-arm64";
+      for(int mirror=0;mirror<RuntimeSources.NODE_MIRRORS.length;mirror++) {
+        String url=RuntimeSources.nodeUrl(mirror,version);log("下载 Node.js "+version+" · "+url);
+        try {
+          runStep("下载 Node.js · "+RuntimeSources.NODE_MIRRORS[mirror],guest("/bin/sh","-ec","mkdir -p /opt; curl -fL --connect-timeout 15 --max-time 120 --retry 1 -o /tmp/node.tar.xz '"+url+"'"),true,255);
+          runStep("校验 Node.js 下载文件",guest("/bin/sh","-ec","echo '"+sha+"  /tmp/node.tar.xz' | sha256sum -c -"),true,30);break;
+        }catch(Exception error) {
+          if(Thread.currentThread().isInterrupted()||mirror==RuntimeSources.NODE_MIRRORS.length-1)throw error;
+          log("Node.js 首选国内镜像下载或校验失败，尝试备用国内镜像…");debugLogger.accept(error.toString());
+        }
+      }
+      log("解压并切换 Node.js…");
+      runStep("解压 Node.js",guest("/bin/sh","-ec","tar -xJf /tmp/node.tar.xz -C /opt; ln -sfn "+name+" /opt/node.new; mv -Tf /opt/node.new /opt/node; rm -f /tmp/node.tar.xz"),true,120);
+    }
+    deployTools();verify(false);
+    write(new File(runtime,"complete"),"1\n");
+    log("初始化／修复完成。三个 Agent 共用这一份环境。");
   }
   public void check() throws Exception {
-    if (!initialized())
-      throw new IOException("请先在设置 → 运行环境中初始化");
-    String result = run(guest("/bin/sh", "-ec",
-            "echo 'AIXS_PROGRESS: 检查 CPU 与 Python'; uname -m; python3 --version; "
-            + "echo 'AIXS_PROGRESS: 检查 Git 与 Node'; git --version; /opt/node/bin/node --version; "
-            + "echo 'AIXS_PROGRESS: 检查 npm'; /opt/node/bin/npm --version; echo SHARED_RUNTIME_OK"),
-        true, 60);
-    log("共享环境检查通过\n" + result.trim());
+    if(!root.isDirectory())throw new IOException("共享环境尚未解压，请先初始化");
+    new File(runtime,"tmp").mkdirs();
+    verify(true);
+  }
+  private void verify(boolean network) throws Exception {
+    JSONObject report=new JSONObject().put("startedAt",System.currentTimeMillis()).put("android",Build.VERSION.RELEASE)
+        .put("device",Build.MANUFACTURER+" "+Build.MODEL).put("freeBytes",new StatFs(root.getAbsolutePath()).getAvailableBytes());
+    org.json.JSONArray results=new org.json.JSONArray(),failures=new org.json.JSONArray();report.put("checks",results);
+    File reportFile=new File(runtime,"health-report.json");
+    JSONObject sources;
+    try{sources=json(new File(runtime,"download-sources.json"));}catch(Exception ignored){sources=new JSONObject().put("apt",RuntimeSources.APT_MIRRORS[0]).put("npm",RuntimeSources.NPM);}
+    JSONObject aptConfiguration=new JSONObject();String actualApt="";
+    for(File file:aptSourceFiles())if(file.isFile()) {
+      String content=RuntimeFiles.read(file);aptConfiguration.put(file.getName(),content);
+      if(actualApt.isEmpty())actualApt=RuntimeSources.activeUbuntuUri(content);
+    }
+    sources.put("apt",actualApt);report.put("aptConfiguration",aptConfiguration);
+    report.put("downloadSources",sources);
+    write(reportFile,report.toString(2));
+    log("逐项检查已安装的共享环境…");
+
+    String nodeVersion=assetJson("runtime/catalog.json").getJSONObject("node").getString("version");
+    for(RuntimeChecks.Probe probe:RuntimeChecks.local(nodeVersion)) {
+      log("检查："+probe.label+"…");long began=android.os.SystemClock.elapsedRealtime();
+      JSONObject item=new JSONObject().put("id",probe.id).put("label",probe.label).put("timeoutSeconds",probe.seconds).put("command",new org.json.JSONArray(Arrays.asList(probe.command))).put("status","running");
+      results.put(item);write(reportFile,report.toString(2));
+      debugLogger.accept("检查命令 ["+probe.id+"]："+Arrays.toString(probe.command));
+      try {String output=runStep(probe.label,guest(probe.command),true,probe.seconds);item.put("status","passed").put("output",output);log("通过："+probe.label);}
+      catch(Exception e){String reason=RuntimeChecks.reason(probe.id,e);item.put("status","failed").put("reason",reason).put("detail",e.toString());failures.put(probe.label+"："+reason);log("失败："+probe.label+" · "+reason);}
+      item.put("elapsedMs",android.os.SystemClock.elapsedRealtime()-began);write(reportFile,report.toString(2));
+    }
+    report.put("runtimeHealthy",failures.length()==0).put("failures",failures);
+    if(network) {
+      log("独立检查网络（网络失败不代表基础环境损坏）…");
+      for(RuntimeChecks.Probe probe:RuntimeChecks.network(actualApt,nodeVersion)) {
+        long began=android.os.SystemClock.elapsedRealtime();
+        JSONObject item=new JSONObject().put("id",probe.id).put("label",probe.label).put("timeoutSeconds",probe.seconds)
+            .put("command",new org.json.JSONArray(Arrays.asList(probe.command))).put("status","running");results.put(item);
+        write(reportFile,report.toString(2));debugLogger.accept("网络检查命令 ["+probe.id+"]："+Arrays.toString(probe.command));
+        try{String output=runStep(probe.label,guest(probe.command),true,probe.seconds);item.put("status","passed").put("output",output);log("网络通过："+probe.label);}
+        catch(Exception e){String reason=RuntimeChecks.reason(probe.id,e);item.put("status","warning").put("reason",reason).put("detail",e.toString());log("网络提示："+probe.label+" · "+reason);}
+        item.put("elapsedMs",android.os.SystemClock.elapsedRealtime()-began);write(reportFile,report.toString(2));
+      }
+    }
+    report.put("finishedAt",System.currentTimeMillis());write(reportFile,report.toString(2));
+    if(failures.length()>0)throw new IOException("环境检测发现 "+failures.length()+" 项问题：\n"+String.join("\n",toStrings(failures))+"\n详细结果已保存，可从运行日志导出。");
+    log("基础环境逐项检查通过；详细结果已保存。");
+  }
+  private static List<String> toStrings(org.json.JSONArray array) {
+    List<String> values=new ArrayList<>();for(int i=0;i<array.length();i++)values.add(array.optString(i));return values;
   }
   public void deployTools() throws Exception {
     File tools = new File(root, "opt/aixs/tools");
@@ -262,7 +351,7 @@ public final class RuntimeManager {
     }
   }
   private void requireReady() throws IOException {
-    if (!new File(runtime, "complete").isFile())
+    if (!complete())
       throw new IOException("请先在设置 → 运行环境完成初始化");
   }
   public void installAgent(String agent) throws Exception {

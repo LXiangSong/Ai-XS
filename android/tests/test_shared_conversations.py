@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-from shared_conversations import SharedConversations
+from shared_conversations import SharedConversations, timestamp_seconds
 
 
 class SharedConversationTests(unittest.TestCase):
@@ -30,6 +30,7 @@ class SharedConversationTests(unittest.TestCase):
             self.native[tid]={'id':tid,'engine':engine,'cwd':str(self.root),'model':'test','turns':[]}
             return {'thread':copy.deepcopy(self.native[tid])}
         if method in ('thread/resume','native/permissions/set'):return {}
+        if method=='thread/delete':self.native.pop(params['threadId'],None);return {}
         if method=='turn/start':
             tid=params['threadId'];data=self.native[tid];engine=data['engine']
             turn={'id':'turn-'+str(len(data['turns'])),'status':'inProgress','items':[
@@ -73,6 +74,26 @@ class SharedConversationTests(unittest.TestCase):
         restored=self.make_store().handle('thread/read',{'threadId':ident})['thread']
         self.assertEqual(restored['turns'],doc['turns']);self.assertEqual(restored['engine'],'deepseek')
 
+    def test_streamed_reasoning_survives_reading_during_a_live_turn(self):
+        ident=self.start('claude');self.send(ident,'claude','one');doc=self.store.adopt(ident)
+        source=doc['binding']['threadId']
+        def event(method, **params):
+            return self.store.translate({'type':'notification','method':method,'params':{'threadId':source,**params}},True)
+        event('turn/started',turn={'id':'live','status':'inProgress','items':[]})
+        event('item/started',turnId='live',item={'id':'thought','type':'reasoning','content':[],'status':'inProgress'})
+        event('item/reasoning/textDelta',turnId='live',itemId='thought',contentIndex=0,delta='Inspect')
+        event('item/reasoning/textDelta',turnId='live',itemId='thought',contentIndex=0,delta=' files')
+        event('item/reasoning/summaryTextDelta',turnId='live',itemId='thought',summaryIndex=1,delta='Plan')
+        # A later tool status persists the live turn before any final thought arrives.
+        event('item/started',turnId='live',item={'id':'read','type':'dynamicToolCall','tool':'Read','status':'inProgress'})
+        live=self.store.view(doc)['turns'][-1]
+        self.assertEqual(live['status'],'inProgress')
+        thought=next(i for i in live['items'] if i['id']=='thought')
+        self.assertEqual(thought['content'],['Inspect files'])
+        self.assertEqual(thought['summary'],['','Plan'])
+        saved=json.loads(self.store._path(ident).read_text())['turns'][-1]['items'][0]
+        self.assertEqual(saved['content'],['Inspect files'])
+
     def test_same_agent_reuses_native_context_and_permission_is_scoped(self):
         ident=self.start('codex');self.send(ident,'codex','one');self.send(ident,'codex','two')
         self.assertEqual(sum(method=='thread/start' for method,_ in self.calls),1)
@@ -84,7 +105,34 @@ class SharedConversationTests(unittest.TestCase):
         modes=[args['mode'] for method,args in self.calls if method=='native/permissions/set']
         self.assertEqual(modes,['ask','ask','auto'])
 
-    def test_import_rename_fork_archive_delete_preserve_native_history(self):
+    def test_native_null_timestamps_do_not_drop_final_turn_or_live_duration(self):
+        ident=self.start('codex');self.send(ident,'codex','one')
+        source=self.store.adopt(ident)['binding']['threadId']
+        def event(method,turn):
+            return self.store.translate({'method':method,'params':{'threadId':source,'turn':turn}},True)['params']['turn']
+        start=event('turn/started',{'id':'nullable','status':'inProgress','startedAt':None,'completedAt':None,'items':[]})
+        self.assertIsInstance(start['startedAt'],(int,float))
+        final=event('turn/completed',{'id':'nullable','status':'completed','startedAt':None,'completedAt':None,'durationMs':None,
+            'items':[{'id':'answer','type':'agentMessage','text':'Done.'}]})
+        self.assertEqual(final['startedAt'],start['startedAt'])
+        self.assertIsInstance(final['completedAt'],(int,float));self.assertGreaterEqual(final['durationMs'],0)
+        restored=self.make_store().handle('thread/read',{'threadId':ident})['thread']['turns'][-1]
+        self.assertEqual(restored['status'],'completed');self.assertEqual(restored['items'][0]['text'],'Done.')
+
+    def test_native_timestamps_normalize_units_and_preserve_exact_duration(self):
+        for stamp in (None,0,False,float('nan'),'invalid'):self.assertIsNone(timestamp_seconds(stamp))
+        self.assertEqual(timestamp_seconds(1800000000123),1800000000.123)
+        self.assertEqual(timestamp_seconds('2027-01-15T08:00:00Z'),1800000000)
+        ident=self.start('codex');self.send(ident,'codex','one');source=self.store.adopt(ident)['binding']['threadId']
+        def event(method,**fields):
+            return self.store.translate({'method':method,'params':{'threadId':source,'turn':dict(id='timed',items=[],**fields)}},True)['params']['turn']
+        event('turn/started',status='inProgress',startedAt=1800000000123,completedAt=0)
+        final=event('turn/completed',status='completed',startedAt=0,completedAt=1800000002623,durationMs=None)
+        self.assertEqual(final['durationMs'],2500);self.assertEqual(final['startedAt'],1800000000.123)
+        final=event('turn/completed',status='completed',completedAt=1800000003000,durationMs=2601)
+        self.assertEqual(final['durationMs'],2601)
+
+    def test_import_rename_fork_archive_delete_removes_native_and_retains_fork(self):
         self.native['deepseek-old']={'id':'deepseek-old','cwd':str(self.root),'model':'test','preview':'legacy','turns':[
             {'id':'old','status':'completed','items':[{'id':'user','type':'userMessage','content':[{'type':'text','text':'old words'}]}]}]}
         doc=self.store.handle('thread/read',{'threadId':'deepseek-old'})['thread']
@@ -95,7 +143,10 @@ class SharedConversationTests(unittest.TestCase):
         self.store.handle('thread/archive',{'threadId':doc['id']})
         self.assertEqual(self.store.listing([],True)[0]['name'],'shared title')
         self.store.handle('thread/delete',{'threadId':doc['id']})
-        self.assertIn('deepseek-old',self.native)
+        self.assertNotIn('deepseek-old',self.native)
+        self.assertFalse(self.store._path(doc['id']).exists())
+        self.assertEqual(self.store.adopt(fork['id'])['turns'],fork['turns'])
+        self.assertNotIn('preview',self.store.index[doc['id']])
         self.assertFalse(any(row['id']==doc['id'] for row in self.store.listing([{'id':'deepseek-old'}],False)))
 
     def test_inflight_switch_rejected_and_failed_launch_retains_history(self):
@@ -218,6 +269,23 @@ class SharedConversationTests(unittest.TestCase):
         self.assertEqual(value['tokenUsage']['total'],{});self.assertTrue(value['totalsPartial'])
         self.store.native_usage=lambda p:(_ for _ in ()).throw(OSError('offline'))
         self.assertEqual(self.store.usage({'threadId':ident}),value)
+
+    def test_old_inactive_deepseek_child_is_recovered_after_switch(self):
+        ident=self.start();self.send(ident,'deepseek','old model history');doc=self.store.adopt(ident)
+        source=doc['binding']['threadId']
+        self.store.record_usage(doc,'deepseek',source,{'tokenUsage':{'last':{'totalTokens':8},'total':{}}},model='test')
+        self.store.handle('switch',{'threadId':ident,'engine':'codex'})
+        calls=[]
+        def native_usage(child):
+            calls.append(child['threadId'])
+            return {'nativeUsageRecovered':True,'tokenUsage':{'total':{'inputTokens':10,'outputTokens':3},
+                'last':{'totalTokens':10},'modelContextWindow':1000,
+                'byModel':[{'model':'test','total':{'inputTokens':10,'outputTokens':3}}]}}
+        self.store.native_usage=native_usage
+        first=self.store.usage({'threadId':ident})
+        self.assertEqual(first['tokenUsage']['total']['totalTokens'],13)
+        doc['binding']=None
+        self.store.usage({'threadId':ident});self.assertEqual(calls.count(source),1)
 
 
 if __name__=='__main__':unittest.main()

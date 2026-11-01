@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from prepare_gradle import prepare_sdk
+from verify_release import verify
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,12 +26,14 @@ def main():
     command = [str(ROOT / 'android/gradlew'), '--no-daemon', '-PpythonCommand=' + sys.executable]
     if args.offline:
         command.append('--offline')
-    if termux:
-        resource_compiler = shutil.which('aapt2')
-        if not resource_compiler:
-            raise SystemExit('Install the ARM64 resource compiler with: pkg install aapt2')
+    resource_compiler = shutil.which('aapt2')
+    if not env.get('ANDROID_HOME') and not env.get('ANDROID_SDK_ROOT'):
         env['ANDROID_HOME'] = str(prepare_sdk())
+    if termux and not resource_compiler:
+        raise SystemExit('Install the ARM64 resource compiler with: pkg install aapt2')
+    if termux:
         env['GRADLE_OPTS'] = env.get('GRADLE_OPTS', '') + ' -Dorg.gradle.native=false -Dorg.gradle.internal.instrumentation.agent=false'
+    if resource_compiler:
         command += ['-Pandroid.aapt2FromMavenOverride=' + resource_compiler]
     command += [':app:assembleRelease']
     if args.lint:
@@ -54,6 +57,8 @@ def main():
     if not verifier:
         raise SystemExit('Android apksigner is required to verify the release APK')
     subprocess.run([verifier, 'verify', str(destination)], check=True)
+    report = verify(destination, sdk=env.get('ANDROID_HOME') or env.get('ANDROID_SDK_ROOT'))
+    destination.with_suffix('.verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print('Gradle release:', destination)
     print('SHA256:', checksum)
 

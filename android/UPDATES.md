@@ -10,10 +10,10 @@
 
 发布步骤：
 
-1. 在 `android/app/build.gradle` 同时递增 `versionCode` 和 `versionName`；版本名使用三段版本号，如 `0.8.6-alpha` 或 `1.0.0`。
+1. 在 `android/version.properties` 同时递增 `versionCode` 和 `versionName`；App 和后端共用这一份版本。版本名使用三段版本号，如 `0.9.11-alpha` 或 `1.0.0`。
 2. 使用原来的正式签名证书构建。保管 `.state/android-signing`，不要提交到 GitHub；更换签名将无法覆盖现有安装。
-3. 执行 `python android/tools/build.py --lint`，得到 `dist/Ai-XS-<version>.apk` 和 `.apk.sha256`。
-4. 在项目 GitHub Releases 创建 `v<version>` 标签的发布，填写更新说明，上传 APK 与 SHA-256 文件。测试版勾选 pre-release。
+3. 执行 `python android/tools/test_all.py`（缓存齐备可加 `--offline`），得到 `dist/Ai-XS-<version>.apk`、`.apk.sha256`、`.verification.json`、`.validation.json`。再执行 `python android/tools/verify_release.py --production`，确认使用现有正式证书。不能将临时 CI 证书的 APK 用于发布。
+4. 将完整源码提交推送后，等待对应提交的 GitHub Actions 成功；给该提交创建 `v<version>` 标签，创建 Release 并上传 APK、SHA-256 和两份核验报告。测试版勾选 pre-release。
 5. 上传完成后用户即可检查更新。仅提交源代码不会产生可安装的应用更新。
 
 更新器比较语义版本，忽略草稿和无效标签；APK 名称需以 `Ai-XS` 开头，扩展名 `.apk`。
@@ -58,5 +58,18 @@ GitHub 和离线部署包导入仍可用于升级，包格式与原安装功能�
 执行 `python android/tools/test_all.py --offline`（首次下载依赖时去掉 `--offline`），验证 Python 协议测试、Java 测试、完整 Lint、Release 构建与签名。再完成目标 APK 的真机回归，核对安装版本、升级数据保留和界面操作。保留上版签名，上传的 APK 与校验文件必须来自本次构建。
 
 源码推送后等待对应提交的 GitHub Actions 通过，再创建可安装的 Release。CI 使用临时测试签名，其构建包不能作为覆盖更新发布；发布 APK 使用项目既有正式签名。发布后重新下载资产核对 SHA-256，确认 Release 标签、源码提交、APK versionName / versionCode 一致。
+
+可使用下列命令发布已经核验的提交；`<commit>` 必须是 CI 成功的完整提交编号，说明从文件读取，避免丢失换行：
+
+```sh
+git tag -a v<version> <commit> -m 'Ai-XS <version>'
+git push origin v<version>
+gh release create v<version> --repo LXiangSong/Ai-XS --verify-tag --prerelease \
+  --title 'Ai-XS <version>' --notes-file release-notes.md \
+  dist/Ai-XS-<version>.apk dist/Ai-XS-<version>.apk.sha256 \
+  dist/Ai-XS-<version>.verification.json dist/Ai-XS-<version>.validation.json
+```
+
+正式版去掉 `--prerelease`。发布说明需覆盖上次公开版本以来的变化；本机中间版本尚未公开时，不能只列最后一次修改。
 
 更新说明区分已实现功能与设计稿；协作模式分别记录模拟 CLI 测试、生产调度器与真实 CLI 的本地模拟 API 核验、真机 UI 和真实第三方 API 测试，不能混淆验证范围。仓库与源代码包不包含开发机器的 `.state`、用户会话、API 密钥或签名身份。

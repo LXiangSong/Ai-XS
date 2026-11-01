@@ -5,6 +5,9 @@ import time
 import os
 from pathlib import Path
 
+if '--help' in sys.argv:
+    print('--include-hook-events');sys.exit()
+
 if os.environ.get('AI_XS_TEST_WIRE_LOG'):
     prompt=''
     if '--append-system-prompt-file' in sys.argv:
@@ -24,6 +27,8 @@ def finish():
 
 for line in sys.stdin:
     m=json.loads(line)
+    if os.environ.get('AI_XS_TEST_WIRE_LOG'):
+        with Path(os.environ['AI_XS_TEST_WIRE_LOG']).open('a') as log:log.write(json.dumps({'engine':'claude','message':m})+'\n')
     if m['type']=='control_request':
         request=m['request'];kind=request['subtype']
         emit({'type':'control_response','response':{'subtype':'success','request_id':m['request_id'],'response':{'models':[{'value':'default','displayName':'测试 Claude'}]} if kind=='initialize' else {}}})
@@ -38,7 +43,10 @@ for line in sys.stdin:
             emit({'type':'stream_event','event':{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}}})
             emit({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'thinking_delta','thinking':'实时思考'}}})
             emit({'type':'stream_event','event':{'type':'content_block_start','index':1,'content_block':{'type':'tool_use','id':'live-tool','name':'Bash','input':{}}}})
-            emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':'{"command":"echo live"}'}}})
+            emit({'type':'stream_event','event':{'type':'content_block_stop','index':0}})
+            emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':'{"command":"echo '}}})
+            time.sleep(.08)
+            emit({'type':'stream_event','event':{'type':'content_block_delta','index':1,'delta':{'type':'input_json_delta','partial_json':'live"}'}}})
             emit({'type':'stream_event','event':{'type':'content_block_stop','index':1}})
             emit({'type':'tool_progress','tool_use_id':'live-tool','tool_name':'Bash','elapsed_time_seconds':2})
             time.sleep(.25)

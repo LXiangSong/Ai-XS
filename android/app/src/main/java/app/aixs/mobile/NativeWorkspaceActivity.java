@@ -20,12 +20,17 @@ public final class NativeWorkspaceActivity extends androidx.appcompat.app.AppCom
   public void onCreate(Bundle state) {
     super.onCreate(state);
     engine = getIntent().getStringExtra("engine");
-    if (engine == null)
+    if (engine == null || engine.isEmpty())
       engine = "codex";
     cwd = getIntent().getStringExtra("cwd");
     if (cwd == null)
       cwd = getSharedPreferences("native-chat", 0).getString("cwd", "/root/projects");
-    projects();
+    path = cwd;
+    String file = getIntent().getStringExtra("file");
+    if (file != null && !file.isEmpty())
+      editFile(file);
+    else
+      projects();
   }
   private void page(String title) {
     root = NativeUi.page(this, "", this::finish);

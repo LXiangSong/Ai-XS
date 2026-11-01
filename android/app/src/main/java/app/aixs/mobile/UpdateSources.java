@@ -32,7 +32,7 @@ final class UpdateSources {
 
   static JSONObject agent(String id) throws Exception {
     String packageName = ReleaseVersions.npmPackage(id);
-    JSONObject metadata = new JSONObject(get("https://registry.npmjs.org/" + URLEncoder.encode(packageName, "UTF-8") + "/latest"));
+    JSONObject metadata = new JSONObject(get(RuntimeSources.NPM + URLEncoder.encode(packageName, "UTF-8") + "/latest"));
     String version = metadata.getString("version");
     ReleaseVersions.compare(version, version);
     return new JSONObject().put("agent", id).put("version", version).put("package", packageName);

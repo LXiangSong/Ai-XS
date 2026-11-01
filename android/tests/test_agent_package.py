@@ -71,6 +71,17 @@ class PackageTests(unittest.TestCase):
         prefix=self.root/'prefix';(prefix/'bin').mkdir(parents=True);(prefix/'bin/codex').write_text('placeholder')
         with patch.object(package.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'codex-cli 9.0.0','')):
             with self.assertRaisesRegex(ValueError,'版本'):package.check(prefix,'codex','1.2.3')
+    def test_native_tarball_stays_on_trusted_domestic_mirror(self):
+        path='/@anthropic-ai/claude-code-linux-arm64/-/package.tgz'
+        self.assertEqual(package.native_tarball_url('https://registry.npmjs.org'+path),'https://registry.npmmirror.com'+path)
+        self.assertEqual(package.native_tarball_url('https://registry.npmmirror.com'+path),'https://registry.npmmirror.com'+path)
+        for url in ['http://registry.npmmirror.com/pkg.tgz','https://registry.npmmirror.com.evil.test/pkg.tgz','https://registry.npmmirror.com@evil.test/pkg.tgz']:
+            with self.subTest(url=url),self.assertRaises(ValueError):package.native_tarball_url(url)
+    def test_npm_install_uses_domestic_registry(self):
+        stage=self.root/'stage';stage.mkdir()
+        with patch.object(package.subprocess,'run') as run,patch.object(package,'check'):
+            package.populate_prefix(stage,'deepseek','1.2.3')
+        self.assertIn('--registry=https://registry.npmmirror.com',run.call_args.args[0])
     def test_version_cannot_traverse_install_directories(self):
         for version in ['../escape','/absolute','x/../../y','x;echo hello']:
             with self.subTest(version=version),self.assertRaises(ValueError):package.validate('codex',version)

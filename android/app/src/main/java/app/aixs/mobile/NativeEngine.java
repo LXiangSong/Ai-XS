@@ -23,6 +23,8 @@ final class NativeEngine {
   private static volatile Process process;
   private static volatile BufferedWriter input;
   private static volatile CompletableFuture<Void> readiness = new CompletableFuture<>();
+  private static final ActiveWork activeWork = new ActiveWork();
+  static boolean hasActiveWork() { return activeWork.active(); }
   static boolean ready() {
     return process != null && process.isAlive() && readiness.isDone() && !readiness.isCompletedExceptionally();
   }
@@ -149,11 +151,25 @@ final class NativeEngine {
     return error.getMessage() == null ? error.toString() : error.getMessage();
   }
   static void publish(JSONObject event) {
+    activeWork.observe(event);
+    JSONObject params = event.optJSONObject("params");
+    JSONObject turn = params == null ? null : params.optJSONObject("turn");
+    if (params != null && (event.optString("method").equals("error") ||
+        event.optString("method").equals("turn/completed") && turn != null && !turn.isNull("error"))) {
+      String thread = params.optString("threadId"), turnId = turn == null ? params.optString("turnId") : turn.optString("id");
+      String error = ConversationContent.text(turn == null ? params.opt("error") : turn.opt("error"));
+      diagnostics.accept("[ERROR] Agent 执行失败 [thread=" + thread + ", turn=" + turnId + "] " + error);
+    }
     main.post(() -> {
       for (Observer observer : observers) observer.event(event);
     });
   }
+  static long workCheckpoint() { return activeWork.checkpoint(); }
+  static void reconcileWork(JSONObject value,long checkpoint) {
+    activeWork.reconcile(value.optJSONArray("activeTurnKeys"),value.optJSONArray("activeAttemptIds"),checkpoint);
+  }
   static void fail(String reason) {
+    activeWork.clear();
     readiness.completeExceptionally(new IOException(reason));
     input = null;
     process = null;

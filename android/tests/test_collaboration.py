@@ -199,6 +199,288 @@ class CollaborationHostTests(unittest.TestCase):
         self.stop_host();self.start_host();d=self.result('native/collaboration/read',{'workflowId':key})['workflow']
         self.assertTrue(d['accepted']);self.assertEqual(len(d['tasks'][0]['attempts']),1)
 
+    def test_collaboration_conversation_preserves_three_engine_sources_and_tools_after_restart(self):
+        self.configured();d=self.create(('codex','claude','deepseek'),'hello');key=d['id']
+        self.result('native/collaboration/start',{'workflowId':key})
+        d=self.wait(key,lambda d:d['status']=='awaiting_acceptance',20)
+        before=self.result('native/collaboration/conversation',{'workflowId':key})
+        entries=before['entries'];self.assertTrue(entries)
+        self.assertEqual({e['engine'] for e in entries},{'codex','claude','deepseek'})
+        self.assertTrue(any(e.get('item',{}).get('type')=='commandExecution' for e in entries))
+        self.assertTrue(all(e.get('item',{}).get('type')!='userMessage' for e in entries))
+        self.assertFalse(before['historyPartial'])
+        self.assertNotIn('private-codex',json.dumps(entries))
+        self.stop_host();self.start_host()
+        after=self.result('native/collaboration/conversation',{'workflowId':key})
+        self.assertEqual(entries,after['entries'])
+        filtered=self.result('native/collaboration/conversation',{'workflowId':key,'participantId':'p1'})
+        self.assertTrue(filtered['entries']);self.assertTrue(all(e['engine']=='claude' for e in filtered['entries']))
+
+    def inline_chat(self,engines=('codex','claude','deepseek')):
+        tid=self.result('native/chat/thread/start',{'engine':'codex','cwd':str(self.projects)})['thread']['id']
+        people=[{'id':'p'+str(i),'engine':e,'name':e+str(i),'model':'test-model' if i%2==0 else 'second-model','role':'职责 '+str(i),'permission':'ask'} for i,e in enumerate(engines)]
+        self.result('native/collaboration/session/config',{'threadId':tid,'mode':'collaboration','participants':people,'summarize':False})
+        return tid
+
+    def test_inline_streams_have_attempt_sequences_and_match_live_snapshots(self):
+        self.configured();tid=self.inline_chat()
+        response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'live-events',
+            'input':[{'type':'text','text':'progress-demo'}]})
+        key=response['workflow']['id'];seen={};until=time.monotonic()+20
+        def capture(e):
+            if e.get('workflowId')!=key:return
+            self.assertEqual(e.get('conversationId'),tid);self.assertGreater(e.get('attemptSequence',0),0)
+            p=e.get('params',{});engine=e['engine'];method=e.get('method')
+            ready=(engine=='codex' and method=='item/commandExecution/outputDelta' or
+                engine=='claude' and method=='item/started' and p.get('item',{}).get('elapsedSeconds')==2 or
+                engine=='deepseek' and method=='item/started' and bool(p.get('item',{}).get('result')))
+            if ready and engine not in seen:seen[engine]=e
+        for e in self.events:capture(e)
+        while len(seen)<3 and time.monotonic()<until:
+            e=self.messages.get(timeout=max(.1,until-time.monotonic())).get('event',{})
+            self.events.append(e);capture(e)
+        self.assertEqual(set(seen),{'codex','claude','deepseek'})
+        for e in seen.values():
+            index=self.events.index(e)
+            self.assertFalse(any(x.get('attemptId')==e['attemptId'] and x.get('method')=='turn/completed' for x in self.events[:index]))
+        live=self.result('native/collaboration/session/read',{'threadId':tid})['thread']['turns'][-1]
+        for e in seen.values():self.assertGreaterEqual(live['collaborationRevisions'][e['attemptId']],e['attemptSequence'])
+        self.wait(key,lambda d:d['status']=='awaiting_acceptance',20)
+        final=self.result('native/collaboration/session/read',{'threadId':tid})['thread']['turns'][-1]
+        self.assertEqual(final['status'],'completed')
+        for e in seen.values():
+            group=[i for i in final['items'] if i.get('attemptId')==e['attemptId']]
+            self.assertTrue(group);self.assertTrue(all(i['id'].startswith(e['attemptId']+':') for i in group))
+            self.assertTrue(all(i['engine']==e['engine'] and i['model']==e['model'] for i in group))
+            seq=[x['attemptSequence'] for x in self.events if x.get('attemptId')==e['attemptId']]
+            self.assertEqual(seq,sorted(set(seq)))
+
+    def test_inline_modes_share_one_conversation_transcript_history_and_usage(self):
+        self.configured();tid=self.inline_chat()
+        result=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'inline-message','input':[{'type':'text','text':'hello shared conversation'}]})
+        key=result['workflow']['id'];self.assertEqual(result['thread']['id'],tid)
+        self.wait(key,lambda d:d['status']=='awaiting_acceptance',20)
+        before=self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+        self.assertEqual(len(before['turns']),1)
+        turn=before['turns'][0];self.assertEqual(turn['workflowId'],key)
+        self.assertEqual(sum(i['type']=='userMessage' for i in turn['items']),1)
+        self.assertEqual({i['engine'] for i in turn['items'] if i['type']=='agentMessage'},{'codex','claude','deepseek'})
+        self.assertTrue(any(i['type']=='commandExecution' for i in turn['items']))
+        self.assertNotIn('团队分工',json.dumps(turn,ensure_ascii=False))
+        repeated=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'inline-message','input':[{'type':'text','text':'hello shared conversation'}]})
+        self.assertEqual(repeated['workflow']['id'],key);self.assertEqual(len(repeated['thread']['turns']),1)
+        switched=self.result('native/collaboration/session/config',{'threadId':tid,'mode':'independent'})['thread']
+        self.assertEqual(switched['id'],tid);self.assertEqual(switched['turns'],before['turns'])
+        self.assertEqual(switched['usage']['tokenUsage'],before['usage']['tokenUsage'])
+        normal=self.result('native/chat/turn/start',{'threadId':tid,'engine':'codex','input':[{'type':'text','text':'continue independently'}]})
+        until=time.monotonic()+10
+        while time.monotonic()<until:
+            thread=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+            if len(thread['turns'])==2 and thread['turns'][-1]['status']=='completed':break
+            time.sleep(.1)
+        self.assertEqual(thread['id'],tid);self.assertEqual(len(thread['turns']),2)
+        again=self.result('native/collaboration/session/config',{'threadId':tid,'mode':'collaboration'})['thread']
+        self.assertEqual(again['turns'],thread['turns'])
+        self.assertEqual(len(again['collaborationParticipants']),3)
+        self.stop_host();self.start_host()
+        restored=self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+        self.assertEqual(restored['id'],tid);self.assertEqual(restored['executionMode'],'collaboration')
+        self.assertEqual(restored['turns'],again['turns'])
+
+    def test_inline_mode_switch_during_work_and_stop_preserve_pending_independent_message(self):
+        self.configured();tid=self.inline_chat(('codex','codex'))
+        result=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'inline-wait','input':[{'type':'text','text':'wait-for-interrupt'}]})
+        key=result['workflow']['id'];self.wait(key,lambda d:sum(t['status']=='running' for t in d['tasks'])==2)
+        switched=self.result('native/collaboration/session/config',{'threadId':tid,'mode':'independent'})['thread']
+        self.assertEqual(switched['turns'][0]['collaborationStatus'],'running')
+        queued=self.result('native/chat/turn/start',{'threadId':tid,'engine':'codex','input':[{'type':'text','text':'after collaborative stop'}]})
+        self.assertTrue(queued['queued'])
+        self.result('native/collaboration/cancel',{'workflowId':key})
+        self.wait(key,lambda d:not any(t['status'] in ('starting','running','stopping') for t in d['tasks']))
+        until=time.monotonic()+10
+        while time.monotonic()<until:
+            thread=self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+            if len(thread['turns'])==2 and thread['turns'][-1]['status']=='completed':break
+            time.sleep(.1)
+        self.assertEqual(thread['id'],tid);self.assertEqual(len(thread['turns']),2)
+        self.assertEqual(thread['turns'][0]['collaborationStatus'],'cancelled')
+        self.assertEqual(thread['turns'][-1]['status'],'completed')
+
+    def test_usage_all_models_keeps_retired_models_and_stats_across_restart(self):
+        self.configured();tid=self.inline_chat()
+        def submit(request):
+            response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':request,
+                'input':[{'type':'text','text':'usage-accounting'}]})
+            self.wait(response['workflow']['id'],lambda d:d['status']=='awaiting_acceptance',20)
+            return self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+        first=submit('models-one');usage=first['usage']
+        groups={(g['engine'],g['model']):g for g in usage['byModel']}
+        self.assertEqual(groups['codex','test-model']['tokenUsage']['total']['totalTokens'],70)
+        self.assertEqual(groups['claude','second-model']['tokenUsage']['total']['totalTokens'],180)
+        self.assertEqual(groups['deepseek','test-model']['tokenUsage']['total'],{})
+        self.assertEqual(groups['deepseek','test-model']['context']['usedTokens'],123)
+        self.assertEqual(usage['sessionStats']['executions'],3)
+        self.assertEqual(usage['sessionStats']['turns'],1)
+        self.assertEqual(usage['sessionStats']['userMessages'],1)
+        self.assertTrue(usage['totalsPartial'])
+        people=[dict(p) for p in first['collaborationParticipants']]
+        people[1]['model']='test-model'
+        self.result('native/collaboration/session/config',{'threadId':tid,'participants':people})
+        second=submit('models-two');groups={(g['engine'],g['model']):g for g in second['usage']['byModel']}
+        old=groups['claude','second-model'];self.assertTrue(old['historical']);self.assertEqual(old['stats']['executions'],1)
+        self.assertEqual(old['tokenUsage']['total']['totalTokens'],180)
+        self.assertEqual(groups['claude','test-model']['tokenUsage']['total']['totalTokens'],180)
+        self.assertEqual(groups['codex','test-model']['stats']['executions'],2)
+        self.assertEqual(len(groups['codex','test-model']['contexts']),2)
+        self.assertEqual(second['usage']['tokenUsage']['total']['totalTokens'],500)
+        self.assertEqual(second['usage']['sessionStats']['executions'],6)
+        self.stop_host();self.start_host()
+        restored=self.result('native/collaboration/session/read',{'threadId':tid})['thread']['usage']
+        self.assertEqual(restored,second['usage'])
+        repeated=self.result('native/chat/usage/read',{'threadId':tid})
+        self.assertEqual(repeated,restored)
+
+    def test_deepseek_native_usage_is_returned_for_every_collaboration_model(self):
+        self.env['AI_XS_TEST_MULTIMODEL']='1';self.stop_host();self.start_host()
+        self.configured();tid=self.inline_chat(('deepseek','deepseek'))
+        result=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'deepseek-native-models',
+            'input':[{'type':'text','text':'native-usage'}]})
+        self.wait(result['workflow']['id'],lambda d:d['status']=='awaiting_acceptance',20)
+        thread=self.result('native/collaboration/session/read',{'threadId':tid})['thread'];usage=thread['usage']
+        groups={g['model']:g for g in usage['byModel'] if g['engine']=='deepseek'}
+        for model in ('test-model','second-model'):
+            self.assertEqual(groups[model]['tokenUsage']['total']['totalTokens'],15)
+            self.assertEqual(groups[model]['context']['usedTokens'],13)
+            self.assertEqual(groups[model]['context']['windowTokens'],1000)
+            self.assertEqual(groups[model]['stats']['executions'],1)
+        self.assertEqual(usage['tokenUsage']['total']['totalTokens'],30)
+        self.assertEqual(usage['sessionStats']['executions'],2)
+        self.assertEqual(usage['sessionStats']['userMessages'],1)
+
+    def test_live_usage_before_completion_and_stop_keep_same_model_counters(self):
+        self.configured();tid=self.inline_chat(('codex','codex'))
+        response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'live-usage',
+            'input':[{'type':'text','text':'usage-accounting wait-for-interrupt'}]})
+        key=response['workflow']['id']
+        self.wait(key,lambda d:all(a.get('usage') for t in d['tasks'] for a in t['attempts']) and
+            sum(t['status']=='running' for t in d['tasks'])==2)
+        usage=self.result('native/collaboration/session/read',{'threadId':tid})['thread']['usage']
+        groups={(g['engine'],g['model']):g for g in usage['byModel']}
+        for model in ('test-model','second-model'):
+            self.assertEqual(groups['codex',model]['tokenUsage']['total']['totalTokens'],70)
+            self.assertTrue(groups['codex',model]['isActive'])
+            self.assertEqual(groups['codex',model]['context']['usedTokens'],45)
+        self.result('native/collaboration/cancel',{'workflowId':key})
+        self.wait(key,lambda d:not any(t['status'] in ('starting','running','stopping') for t in d['tasks']))
+        final=self.result('native/collaboration/session/read',{'threadId':tid})['thread']['usage']
+        self.assertEqual(final['tokenUsage']['total']['totalTokens'],140)
+        for group in final['byModel']:
+            if group['used']:
+                self.assertFalse(group['isActive']);self.assertEqual(group['stats']['statuses'],{'interrupted':1})
+
+    def delete_finished(self, tid):
+        until=time.monotonic()+5
+        while time.monotonic()<until:
+            reply=self.call('native/chat/thread/delete',{'threadId':tid})
+            if 'error' not in reply:return reply['result']
+            if '尚未' not in reply['error']:self.fail(reply['error'])
+            time.sleep(.05)
+        self.fail('Execution did not fully exit before deletion: '+str(reply))
+
+    def test_delete_purges_collaboration_records_homes_logs_and_git_worktrees(self):
+        self.configured();sentinel='delete-private-'+os.urandom(8).hex()
+        source=self.projects/'source.txt';source.write_text('keep original source')
+        for args in [('init',),('config','user.email','test@example.invalid'),('config','user.name','Test'),('add','.'),('commit','-m','initial')]:
+            workspace.git(self.projects,*args)
+        tid=self.inline_chat();response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'delete-all-data',
+            'input':[{'type':'text','text':sentinel}]})
+        key=response['workflow']['id'];doc=self.wait(key,lambda d:d['status']=='awaiting_acceptance',20)
+        attempts=[a['id'] for t in doc['tasks'] for a in t['attempts']]
+        root=self.folder/'state'/'collaboration'
+        self.assertTrue(all((root/'attempts'/a/'spec.json').exists() for a in attempts))
+        self.assertTrue(self.delete_finished(tid)['deleted'])
+        self.assertTrue(all(not (root/'attempts'/a).exists() for a in attempts))
+        self.assertIn('协作不存在',self.call('native/collaboration/read',{'workflowId':key})['error'])
+        self.assertEqual(source.read_text(),'keep original source')
+        worktrees=workspace.git(self.projects,'worktree','list','--porcelain').decode()
+        self.assertTrue(all(a not in worktrees for a in attempts))
+        self.assertNotIn(sentinel,(root/'collaboration.sqlite').read_bytes().decode(errors='ignore'))
+        if (root/'collaboration.sqlite-wal').exists():self.assertEqual((root/'collaboration.sqlite-wal').stat().st_size,0)
+        self.stop_host();self.start_host()
+        self.assertNotIn(tid,[r['id'] for r in self.result('native/threads/list',{})['data']])
+
+    def test_delete_retains_shared_workflow_and_attachment_until_last_fork(self):
+        import base64
+        self.configured();tid=self.inline_chat(('codex','codex'))
+        image=self.result('files/upload',{'name':'test.png','data':base64.b64encode(b'\x89PNG\r\n\x1a\nexample').decode()})['path']
+        response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'delete-fork-image',
+            'input':[{'type':'text','text':'hello'},{'type':'localImage','path':image}]})
+        key=response['workflow']['id'];doc=self.wait(key,lambda d:d['status']=='awaiting_acceptance',20)
+        fork=self.result('native/chat/thread/fork',{'threadId':tid})['thread'];forkid=fork['id']
+        self.delete_finished(tid)
+        self.assertEqual(self.result('native/collaboration/read',{'workflowId':key})['workflow']['conversationId'],forkid)
+        self.assertTrue(Path(image).exists())
+        preserved=self.result('native/collaboration/session/read',{'threadId':forkid})['thread']
+        self.assertEqual(preserved['usage']['tokenUsage']['total'],fork['usage']['tokenUsage']['total'])
+        self.assertTrue(preserved['turns'])
+        self.delete_finished(forkid)
+        self.assertFalse(Path(image).exists())
+        self.assertIn('error',self.call('native/collaboration/read',{'workflowId':key}))
+
+    def test_delete_active_collaboration_is_rejected_without_hiding_history(self):
+        self.configured();tid=self.inline_chat(('codex','codex'))
+        response=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'delete-running',
+            'input':[{'type':'text','text':'wait-for-interrupt'}]})
+        key=response['workflow']['id'];self.wait(key,lambda d:sum(t['status']=='running' for t in d['tasks'])==2)
+        failed=self.call('native/chat/thread/delete',{'threadId':tid});self.assertIn('停止',failed['error'])
+        self.assertTrue(self.result('native/chat/thread/read',{'threadId':tid})['thread']['turns'])
+        self.result('native/collaboration/cancel',{'workflowId':key})
+        self.wait(key,lambda d:not any(t['status'] in ('starting','running','stopping') for t in d['tasks']))
+        self.assertTrue(self.delete_finished(tid)['deleted'])
+
+    def test_delete_one_shared_chat_removes_all_three_native_agent_histories(self):
+        self.configured()
+        tid=self.result('native/chat/thread/start',{'engine':'codex','cwd':str(self.projects),'model':'test-model'})['thread']['id']
+        for engine in ('codex','claude','deepseek'):
+            self.result('native/chat/switch',{'threadId':tid,'engine':engine,'model':'test-model'})
+            self.result('native/chat/turn/start',{'threadId':tid,'engine':engine,'model':'test-model','input':[{'type':'text','text':'private history '+engine}]})
+            until=time.monotonic()+10
+            while time.monotonic()<until:
+                chat=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+                if chat['turns'][-1]['status']=='completed':break
+                time.sleep(.05)
+        self.assertEqual(self.delete_finished(tid)['nativeSessionsDeleted'],3)
+        state=self.folder/'state'
+        self.assertFalse(list((state/'claude').glob('claude-*.json')))
+        self.assertFalse(list((state/'deepseek').glob('deepseek-*.json')))
+        self.assertFalse(json.loads((self.folder/'.codex'/'fake-threads.json').read_text()))
+        self.assertNotIn('private history',(state/'conversations'/'index.json').read_text())
+        self.stop_host();self.start_host()
+        self.assertNotIn(tid,[r['id'] for r in self.result('native/threads/list',{})['data']])
+
+    def test_editing_before_collaboration_keeps_old_round_only_in_backup_branch(self):
+        self.configured();tid=self.inline_chat(('codex','codex'))
+        result=self.result('native/collaboration/session/submit',{'threadId':tid,'clientRequestId':'edit-collaboration','input':[{'type':'text','text':'hello'}]})
+        key=result['workflow']['id'];self.wait(key,lambda d:d['status']=='awaiting_acceptance')
+        thread=self.result('native/collaboration/session/config',{'threadId':tid,'mode':'independent'})['thread']
+        turn=thread['turns'][0];item=turn['items'][0]
+        result=self.result('native/chat/turn/edit',{'threadId':tid,'engine':'codex','turnId':turn['id'],'itemId':item['id'],'text':'edited independent message','model':'test-model'})
+        current=self.result('native/collaboration/session/read',{'threadId':tid})
+        self.assertFalse(current['workflows'])
+        self.assertFalse(any(t.get('workflowId')==key for t in current['thread']['turns']))
+        backup=self.result('native/chat/thread/read',{'threadId':result['editBackupThreadId']})['thread']
+        self.assertTrue(any(t.get('workflowId')==key for t in backup['turns']))
+
+    def test_legacy_workflows_migrate_into_the_original_conversation_once(self):
+        self.configured();doc=self.create(('codex',),'hello');key=doc['id'];tid=doc['conversationId']
+        self.result('native/collaboration/start',{'workflowId':key});self.wait(key,lambda d:d['status']=='awaiting_acceptance')
+        self.result('native/collaboration/accept',{'workflowId':key})
+        first=self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+        second=self.result('native/collaboration/session/read',{'threadId':tid})['thread']
+        self.assertEqual(first,second);self.assertEqual(len(first['turns']),1)
+        self.assertEqual(first['turns'][0]['workflowId'],key)
+        self.assertIn('legacySummary',first['turns'][0])
+
     def test_disabled_agent_never_silently_starts_and_maintenance_blocks(self):
         self.configured();self.result('native/agents/control',{'action':'stop','target':'claude','confirmed':True})
         d=self.create(('claude',),'hello');key=d['id'];self.result('native/collaboration/start',{'workflowId':key});time.sleep(.7)
@@ -265,3 +547,26 @@ class CollaborationHostTests(unittest.TestCase):
         self.assertEqual(attempts[1]['config']['engine'],'claude')
         self.assertGreaterEqual(attempts[1]['startedAt'],attempts[0]['finishedAt'])
         self.result('native/collaboration/cancel',{'workflowId':key})
+
+    def test_startup_finishes_legacy_deleted_conversations(self):
+        self.configured()
+        tid=self.result('native/chat/thread/start',{'engine':'codex','cwd':str(self.projects),'model':'test-model'})['thread']['id']
+        self.result('native/chat/turn/start',{'threadId':tid,'engine':'codex','model':'test-model',
+            'input':[{'type':'text','text':'legacy hidden conversation'}]})
+        until=time.monotonic()+10
+        while time.monotonic()<until:
+            chat=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+            if chat['turns'] and chat['turns'][-1]['status']=='completed':break
+            time.sleep(.05)
+        self.stop_host()
+        indexfile=self.folder/'state'/'conversations'/'index.json'
+        index=json.loads(indexfile.read_text());row=index[tid]
+        row['deleted']=True;row.pop('deletionComplete',None);row.pop('deletedNativeSources',None)
+        indexfile.write_text(json.dumps(index,ensure_ascii=False))
+        self.start_host()
+        until=time.monotonic()+8
+        while time.monotonic()<until:
+            if json.loads(indexfile.read_text())[tid].get('deletionComplete'):break
+            time.sleep(.05)
+        self.assertTrue(json.loads(indexfile.read_text())[tid].get('deletionComplete'))
+        self.assertNotIn(tid,[r['id'] for r in self.result('native/threads/list',{})['data']])

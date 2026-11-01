@@ -102,7 +102,7 @@ final class Ui {
   static TextView pill(Context c, CharSequence value, int fg, int bg) {
     TextView t = text(c, value, 10.5f, fg, medium(c));
     t.setGravity(Gravity.CENTER);
-    t.setPadding(dp(c, 12), dp(c, 5), dp(c, 12), dp(c, 5));
+    t.setPadding(dp(c, 12), dp(c, 6), dp(c, 12), dp(c, 6));
     t.setBackground(round(bg, 999f));
     return t;
   }

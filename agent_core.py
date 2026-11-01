@@ -18,12 +18,15 @@ import uuid
 from pathlib import Path
 from claude_bridge import ClaudeBridge
 from deepseek_bridge import DeepSeekBridge
+from native_usage import read_usage as read_native_usage
 from mcp_manager import McpManager
 from assistant_tools import extensions
 from engine_manager import EngineManager
 from local_tools import LocalTools
 from provider_manager import ProviderManager
 from permission_modes import PermissionModes, apply as permission_params, validate as validate_permission
+from file_reports import TurnFileReports
+from native_children import CodexChildren
 
 ROOT = Path(__file__).resolve().parent
 UPLOADS = ROOT / ".uploads"
@@ -49,6 +52,26 @@ class AppServer:
         self.lifecycle_lock = threading.RLock()
         self.reader = None
         self.local_tools = LocalTools(self._emit)
+        self.file_reports = TurnFileReports((STATE, UPLOADS))
+        self.codex_children = CodexChildren(self._watch_child,STATE/'codex-children')
+
+    def _watch_child(self, tid):
+        def watch():
+            try:
+                for attempt in range(4):
+                    try:
+                        result=self.call('thread/resume',{'threadId':tid},timeout=20);break
+                    except RuntimeError as error:
+                        if attempt==3 or not any(t in str(error).lower() for t in ('no rollout','not found')):raise
+                        time.sleep((.1,.3,.8)[attempt])
+                for event in self.codex_children.replay(result.get('thread'),result.get('model')):self._emit(event)
+            except Exception as error:
+                self._codex_event({'type':'notification','method':'warning','params':{
+                    'threadId':tid,'message':'子任务实时订阅失败：'+str(error)[:300]}})
+        threading.Thread(target=watch,name='codex-child-watch',daemon=True).start()
+
+    def _codex_event(self, event):
+        for projected in self.codex_children.observe(event):self._emit(projected)
 
     def start(self):
         with self.lifecycle_lock:
@@ -86,6 +109,13 @@ class AppServer:
             except Exception:pass  # Cached capabilities remain available offline.
 
     def _emit(self, event):
+        try:self.file_reports.observe(event)
+        except Exception as error:
+            # File reporting must never hide an Agent result or its final event.
+            if event.get('method')=='turn/completed':
+                event.get('params',{}).get('turn',{}).setdefault('items',[]).append({
+                    'id':'aixs-file-report','type':'fileReport','status':'failed',
+                    'partial':True,'text':'文件清单检查失败：'+type(error).__name__})
         with self.event_condition:
             self.event_id += 1
             event["seq"] = self.event_id
@@ -108,6 +138,10 @@ class AppServer:
             except json.JSONDecodeError:
                 continue
             if "id" in message and ("result" in message or "error" in message):
+                result=message.get('result') or {}
+                if isinstance(result,dict):
+                    self.file_reports.bind(result.get('thread'))
+                    self.codex_children.bind(result.get('thread'),result.get('model'))
                 with self.lock:
                     waiter = self.pending.get(message["id"])
                 if waiter:
@@ -116,7 +150,7 @@ class AppServer:
             elif "method" in message and "id" in message:
                 approval_id = str(message["id"])
                 self.approvals[approval_id] = message
-                self._emit({"type": "approval", "id": approval_id, "method": message["method"], "params": message.get("params", {})})
+                self._codex_event({"type": "approval", "id": approval_id, "method": message["method"], "params": message.get("params", {})})
             elif "method" in message:
                 params = message.get('params', {})
                 if message['method'] == 'turn/started':
@@ -125,7 +159,7 @@ class AppServer:
                     self.active_turns.pop(params['threadId'], None)
                 if message["method"] == "serverRequest/resolved":
                     self.approvals.pop(str(message.get("params", {}).get("requestId")), None)
-                self._emit({"type": "notification", "method": message["method"], "params": message.get("params", {})})
+                self._codex_event({"type": "notification", "method": message["method"], "params": message.get("params", {})})
         if self.process is not process:
             return
         with self.lock:
@@ -139,7 +173,7 @@ class AppServer:
 
     def _interrupt_turns(self):
         for tid, turn_id in list(self.active_turns.items()):
-            self._emit({'type':'notification','method':'turn/completed','params':{'threadId':tid,'turn':{'id':turn_id,'status':'interrupted','items':[]}}})
+            self._codex_event({'type':'notification','method':'turn/completed','params':{'threadId':tid,'turn':{'id':turn_id,'status':'interrupted','items':[]}}})
         self.active_turns.clear()
 
     def stop(self):
@@ -169,6 +203,21 @@ class AppServer:
         self.process = None
 
     def call(self, method, params=None, timeout=120):
+        if method=='turn/start' and params:self.codex_children.set_model(params.get('threadId'),params.get('model'))
+        if method=='turn/interrupt' and params:
+            tid=params.get('threadId');turnid=params.get('turnId')
+            children=self.codex_children.active_children(tid,turnid)
+            self.codex_children.interrupt(tid,turnid)
+            for child,child_turn in children:
+                if child!=tid:
+                    try:
+                        self.call('turn/interrupt',{'threadId':child,'turnId':child_turn},timeout=min(timeout,5))
+                    except Exception as error:
+                        # Children can finish between the activity snapshot and
+                        # this RPC. Their rejection must not block the parent.
+                        self._codex_event({'type':'notification','method':'warning','params':{
+                            'threadId':child,'turnId':child_turn,
+                            'message':'子任务停止请求未确认，继续停止主任务：'+str(error)[:300]}})
         with self.lock:
             self.next_id += 1
             request_id = self.next_id
@@ -294,35 +343,9 @@ def read_thread_usage(thread_id, local_thread=None):
     path = Path(thread["path"])
     if not path.is_file():
         return result
-    names = {"input_tokens": "inputTokens", "cached_input_tokens": "cachedInputTokens",
-             "cache_write_input_tokens": "cacheWriteInputTokens", "output_tokens": "outputTokens",
-             "reasoning_output_tokens": "reasoningOutputTokens", "total_tokens": "totalTokens"}
-    def breakdown(value):
-        return {target: value[key] for key, target in names.items()
-                if isinstance(value.get(key), int) and not isinstance(value[key], bool) and value[key] >= 0}
-    for line in recent_rollout_rows(path):
-        if b'"token_count"' not in line and b'"compacted"' not in line:
-            continue
-        try:
-            row = json.loads(line)
-        except (ValueError, UnicodeError):
-            continue  # A running CLI may be in the middle of writing a record.
-        if row.get("type") == "compacted":
-            result["contextStale"] = True
-            result["compactedAt"] = result["compactedAt"] or row.get("timestamp")
-            continue
-        payload = row.get("payload", {})
-        if row.get("type") != "event_msg" or payload.get("type") != "token_count":
-            continue
-        info = payload.get("info")
-        if not isinstance(info, dict) or not isinstance(info.get("last_token_usage"), dict):
-            continue
-        capacity = info.get("model_context_window")
-        result["tokenUsage"] = {"last": breakdown(info["last_token_usage"]),
-                                "total": breakdown(info.get("total_token_usage") or {}),
-                                "modelContextWindow": capacity if isinstance(capacity, int) and capacity > 0 else None}
-        result["recordedAt"] = row.get("timestamp")
-        return result
+    recovered=read_native_usage(path,'codex')
+    if recovered['tokenUsage']['byModel']:
+        result.update(recovered)
     return result
 
 

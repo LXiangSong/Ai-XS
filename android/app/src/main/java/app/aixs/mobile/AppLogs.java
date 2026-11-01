@@ -53,7 +53,7 @@ final class AppLogs {
     for (String agent : new String[] {"codex", "claude", "deepseek"}) out.append(agent).append(": ").append(manager.installed(agent)).append('\n');
     File state = new File(context.getFilesDir(), "runtime-operation.json");
     if (state.isFile()) out.append("\n最近操作\n").append(RuntimeManager.json(state).toString(2)).append('\n');
-    for (String name : new String[] {"events.previous.jsonl", "events.jsonl", "debug.previous.jsonl", "debug.jsonl", "runtime.log", "browser.previous.log", "browser.log"}) {
+    for (String name : new String[] {"events.previous.jsonl", "events.jsonl", "debug.previous.jsonl", "debug.jsonl", "runtime/health-report.json", "runtime.log", "browser.previous.log", "browser.log"}) {
       File path = new File(context.getFilesDir(), name);
       if (path.isFile()) out.append("\n--- ").append(name).append("（最多 1 MB）---\n")
           .append(RuntimeLogText.filter(RuntimeLogText.read(path, 1024 * 1024), "all", ""));

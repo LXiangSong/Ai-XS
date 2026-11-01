@@ -11,7 +11,7 @@ Ai-XS 与 AI-Web 完全分开，是包名 `app.aixs.mobile` 的独立原生 Andr
 
 - 主题：浅色为雾白底 + 靛蓝主色；深色为近黑底 + 亮靛蓝，并用薄荷绿表示在线/运行状态。
   系统栏透明、跟随深浅色切换图标，键盘与手势条使用同一套 inset 逻辑。
-- 首页三段式：56dp 顶栏（菜单、会话标题 + 项目·模型、Agent 胶囊、新建）、
+- 首页三段式：56dp 顶栏（菜单、会话标题 + 项目·模型、Agent 胶囊、会话详情）、
   中部对话流、底部输入卡；输入卡为 24dp 圆角，包含项目胶囊、自动增高输入框、
   模型与思考强度胶囊、44dp 圆形发送/停止按钮；输入卡上方的项目胶囊可换目录，
   右侧是权限模式胶囊（询问 / 自动），两者在窄屏会自动让位而不挤压输入框。
@@ -77,10 +77,12 @@ Ai-XS 与 AI-Web 完全分开，是包名 `app.aixs.mobile` 的独立原生 Andr
 ## 构建
 
 ```sh
-python android/tools/prepare_runtime.py   # 仅首次或更新内置环境资产时需要
-cd android
-./gradlew assembleRelease
+python android/tools/check_project.py
+python android/tools/test_all.py           # 首次联网下载构建依赖
+# 缓存完整后可加 --offline；仅构建使用 build.py --lint。
 ```
+
+普通构建直接使用仓库的固定基础资产，不必重新运行 `prepare_runtime.py`。签名准备、版本维护和分层测试见[开发指南](../docs/DEVELOPMENT.md)。
 
 根项目 Gradle Wrapper 固定 Gradle `8.11.1` 并校验 SHA-256；Android Gradle Plugin 固定 `8.9.3`；
 Material Components 固定 `1.14.0`。SDK 平台 35 与 Build Tools 35.0.0，Java 17 源兼容，
@@ -88,7 +90,7 @@ JDK 21 构建；优先使用官方 Android SDK Manager 已安装的 SDK/构建�
 
 运行 `prepare_runtime.py` 会打包一份 ARM64 Ubuntu、PRoot 与 loader；不读取 AI-Web、用户凭据或历史。
 Release APK 使用当前本机 `.state/android-signing/` 密钥，更新必须复用同一签名身份。
-本地 APK 路径：`app/build/outputs/apk/release/app-release.apk`。
+本地 APK 路径：`app/build/outputs/apk/release/Ai-XS-<versionName>.apk`，文件名自动带上版本号。
 
 ## 行为约定
 
@@ -191,6 +193,16 @@ Codex Token 用量通过只读索引定位本地日志，不为用量查询额�
 
 ## 当前发布范围
 
-当前版本 `0.8.8-alpha`。安装、检查和更新结果保留在当前操作页，手动收起后隐藏；失败提供对应 Debug 日志入口。API 配置页重建保留当前 Agent，密钥不写入页面恢复状态。
+当前版本 `0.9.7-alpha`。独立与协作使用单一执行按钮：有文字或附件时发送，执行中输入为空时停止当前执行，停止后输入为空时继续原任务；统一待发队列支持编辑、删除与引入，详见 [队列说明](MESSAGE_QUEUE.md)。安装、检查和更新结果保留在当前操作页，手动收起后隐藏；失败提供对应 Debug 日志入口。API 配置页重建保留当前 Agent，密钥不写入页面恢复状态。协作后端接口见 [接口说明](COLLABORATION_BACKEND_V2.md)。
 
-多参与者协作仍处于[实现规格设计](../design/COLLABORATION.md)阶段；[底层核验](../design/COLLABORATION_FEASIBILITY.md)使用真实 CLI 和本地模拟 API，未接入当前 APK。
+多参与者协作已接入当前 APK，支持独立成员进程、任务依赖、暂停／停止、重试与执行记录；高级能力的范围仍以[实现规格](../design/COLLABORATION.md)为参考。[底层核验](../design/COLLABORATION_FEASIBILITY.md)使用真实 CLI 和本地模拟 API。
+
+协作聊天直接消费成员事件并复用独立模式的流式归一，思考、命令输出、工具参数与进度在任务完成前更新。执行尝试使用独立条目命名空间和事件序号；整段读取携带相应版本，旧读取结果不覆盖较新的实时内容。协作回合虽不占用普通回合的运行状态，仍按内容变化重新绘制；无输出的命令与工具也显示活动卡片。
+
+## 环境安装与故障定位
+
+安装包仍只内置 Ubuntu 基础系统；Python、Git、TLS/CA、curl、xz、Node.js 与 npm 在初始化时按需下载。依赖补装分为“恢复未完成的软件包配置”“更新软件源”“下载依赖”“解包与配置”“验证运行”，Node.js 分为版本检查、下载、SHA-256 校验、解压与实际运行检查，每步独立超时。不会清空已有 Agent、项目、配置或会话。
+
+初始化默认将 Ubuntu 24.04 ARM64 的 `ubuntu-ports` 源（含 `noble-security`）改为中科大，更新索引或下载失败时尝试清华；首次更改前在 `runtime/source-backups/` 生成 `.aixs-backup`，保留自定义第三方源。基础系统尚无 CA 包，因此 APT 引导使用镜像的 HTTP 地址，仍由 Ubuntu 自带 keyring 验证索引签名与包哈希，不关闭签名校验。Node.js 使用 npmmirror / 清华 HTTPS 镜像，继续按目录内固定的官方 SHA-256 校验；npm、Agent 原生包下载与版本查询使用 npmmirror HTTPS。App 在 GitHub 上的更新服务独立于初始化。
+
+环境检测分别检查 PRoot/Shell、临时目录、Python 启动、标准库／SQLite／ctypes／子进程／字节码编译、TLS CA、Git 本地仓库、curl、xz、Node 文件与子进程、npm 和 dpkg 状态；每项记录超时、最后输出、退出码与可读取的进程状态。实际 Ubuntu 源、国内 Node.js 主／备用源与 npm 的 DNS／TCP／TLS 单独诊断，网络不可达不冒充环境文件损坏。`runtime/health-report.json` 包含实际 APT 配置并随诊断报告导出；证据不足时保留为待定位，不仅凭超时断言某一品牌系统杀后台。

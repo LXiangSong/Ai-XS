@@ -31,6 +31,7 @@ class NativeHostTests(unittest.TestCase):
         self.env={**os.environ,'HOME':str(self.folder),'AI_XS_STATE_DIR':str(self.folder/'state'),
             'PATH':str(binpath)+os.pathsep+os.environ['PATH'],'AI_XS_TEST_WIRE_LOG':str(self.folder/'wire.jsonl'),
             'CODEX_HOME':str(self.folder/'.codex'),
+            'DSH_HOME':str(self.folder/'.dsh'),
             'AI_XS_ENGINE_HOME':str(self.folder),'AI_XS_SINGLE_AGENT':'1','CODEX_ZH_PROJECTS':str(self.projects),
             'AI_XS_CLAUDE_COMMAND':json.dumps([sys.executable,str(ROOT/'tests/fake_claude.py')]),
             'AI_XS_DEEPSEEK_COMMAND':json.dumps([sys.executable,str(ROOT/'tests/fake_deepseek.py')])}
@@ -48,7 +49,15 @@ class NativeHostTests(unittest.TestCase):
         ready=self.messages.get(timeout=10);self.assertTrue(ready['ready']);self.assertEqual(ready['transport'],'private-stdio')
 
     def tearDown(self):
-        self.stop_host();self.tmp.cleanup()
+        self.stop_host()
+        # Fake Agent subprocesses may flush their wire log just after the host exits.
+        deadline=time.monotonic()+2
+        while True:
+            try:
+                self.tmp.cleanup();return
+            except OSError:
+                if time.monotonic()>=deadline:raise
+                time.sleep(.05)
 
     def stop_host(self):
         self.process.stdin.close()
@@ -249,6 +258,37 @@ class NativeHostTests(unittest.TestCase):
             time.sleep(.02)
         self.fail('Common turn did not finish')
 
+    def test_deepseek_native_usage_refresh_without_acp_returns_all_three_metrics_live(self):
+        self.result('provider/save',{'engine':'deepseek','mode':'thirdparty','baseUrl':'https://gateway.invalid/v1',
+            'protocol':'openai-completions','models':['test-model'],'key':'private-test-only'})
+        tid=self.result('native/chat/thread/start',{'engine':'deepseek','cwd':str(self.projects),'model':'test-model'})['thread']['id']
+        self.result('native/chat/turn/start',{'threadId':tid,'engine':'deepseek','model':'test-model',
+            'input':[{'type':'text','text':'native-usage wait'}]})
+        until=time.monotonic()+10
+        while time.monotonic()<until:
+            usage=self.result('native/chat/usage/read',{'threadId':tid})
+            if usage['tokenUsage']['total'].get('totalTokens')==15:break
+            time.sleep(.1)
+        self.assertEqual(usage['tokenUsage']['total']['totalTokens'],15)
+        self.assertTrue((self.folder/'.dsh/sessions/fake-project/native-deepseek/session.v4.jsonl').is_file())
+        group=next(g for g in usage['byModel'] if g['engine']=='deepseek' and g['model']=='test-model')
+        self.assertEqual(group['context']['usedTokens'],13);self.assertEqual(group['context']['windowTokens'],1000)
+        self.assertEqual(usage['sessionStats']['executions'],1);self.assertEqual(usage['sessionStats']['turns'],1)
+        self.assertEqual(usage['sessionStats']['userMessages'],1);self.assertEqual(usage['sessionStats']['assistantMessages'],1)
+        thread=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+        self.result('native/chat/turn/interrupt',{'threadId':tid,'turnId':thread['turns'][-1]['id']})
+        until=time.monotonic()+5
+        while time.monotonic()<until:
+            stopped=self.result('native/chat/thread/read',{'threadId':tid})['thread']
+            if stopped['turns'][-1]['status']=='interrupted':break
+            time.sleep(.05)
+        self.assertEqual(stopped['turns'][-1]['status'],'interrupted')
+        self.assertEqual(stopped['usage']['tokenUsage']['total']['totalTokens'],15)
+        self.stop_host();self.start_host()
+        restored=self.result('native/chat/usage/read',{'threadId':tid})
+        self.assertEqual(restored['tokenUsage']['total']['totalTokens'],15)
+        self.assertEqual(restored['sessionStats']['executions'],1)
+
     def test_same_conversation_handoff_reaches_all_three_real_adapters_and_survives_restart(self):
         for engine in ('codex','claude','deepseek'):
             self.result('provider/save',{'engine':engine,'mode':'thirdparty','name':'Protocol test',
@@ -303,17 +343,18 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(doc['turns'][-1]['status'],'completed')
 
     def test_live_retry_thinking_tool_progress_and_codex_output_arrive_before_completion(self):
-        for engine in ('claude','codex'):
+        for engine in ('claude','codex','deepseek'):
             self.result('provider/save',{'engine':engine,'mode':'thirdparty','name':'Local',
-                'baseUrl':'https://gateway.invalid/v1','protocol':'anthropic-messages' if engine=='claude' else 'responses',
+                'baseUrl':'https://gateway.invalid/v1','protocol':{'claude':'anthropic-messages','codex':'responses','deepseek':'openai-completions'}[engine],
                 'models':['test-model'],'key':'private-test'})
             tid=self.result('native/chat/thread/start',{'engine':engine,'cwd':str(self.projects)})['thread']['id']
             self.events.clear()
             self.result('native/chat/turn/start',{'threadId':tid,'engine':engine,'input':[{'type':'text','text':'progress-demo'}]})
-            wanted='item/started' if engine=='claude' else 'item/commandExecution/outputDelta'
+            wanted='item/commandExecution/outputDelta' if engine=='codex' else 'item/started'
             def ready(e):
                 p=e.get('params',{})
-                return e.get('method')==wanted and (engine!='claude' or p.get('item',{}).get('elapsedSeconds')==2)
+                return e.get('method')==wanted and (engine!='claude' or p.get('item',{}).get('elapsedSeconds')==2) and (
+                    engine!='deepseek' or bool(p.get('item',{}).get('result')))
             seen=next((e for e in self.events if ready(e)),None)
             while seen is None:
                 e=self.messages.get(timeout=5).get('event',{});self.events.append(e)
@@ -328,9 +369,24 @@ class NativeHostTests(unittest.TestCase):
                 self.assertEqual(retry['httpStatus'],529);self.assertEqual(retry['maxRetries'],10)
                 command=next(i for i in live['items'] if i['id']=='live-tool')
                 self.assertEqual(command['command'],'echo live')
-            else:
+                partial=next(e['params']['item'] for e in self.events if e.get('params',{}).get('item',{}).get('partialInput'))
+                self.assertEqual(partial['partialInput'],'{"command":"echo ')
+                self.assertFalse(command.get('partialInput'))
+                reason=next(i for i in live['items'] if i['type']=='reasoning')
+                self.assertEqual(reason['content'],['实时思考'])
+            elif engine=='codex':
                 command=next(i for i in live['items'] if i['id']=='live-command')
                 self.assertEqual(command['aggregatedOutput'],'live\n')
+            else:
+                command=next(i for i in live['items'] if i['id']=='live-tool')
+                self.assertEqual(command['status'],'inProgress')
+                self.assertIn('first line',json.dumps(command['result']))
+                reason_events=[e for e in self.events if e.get('params',{}).get('item',{}).get('type')=='reasoning']
+                self.assertEqual(reason_events[0]['method'],'item/started')
+                self.assertEqual(reason_events[0]['params']['item']['status'],'inProgress')
+                thought_deltas=[e['params']['delta'] for e in self.events if e.get('method')=='item/reasoning/textDelta']
+                self.assertEqual(thought_deltas,['实时','思考'])
+                self.assertEqual(next(i for i in live['items'] if i['type']=='reasoning')['content'],['实时思考'])
             deadline=time.monotonic()+5
             while time.monotonic()<deadline:
                 final=self.result('native/chat/thread/read',{'threadId':tid})['thread']['turns'][-1]
@@ -469,6 +525,22 @@ class NativeHostTests(unittest.TestCase):
         result=self.result('native/usage/read',{'engine':'codex','threadId':'local-history','path':'/ignored'})
         self.assertEqual(result['tokenUsage']['last']['inputTokens'],42)
         self.assertEqual(result['tokenUsage']['total']['outputTokens'],20)
+        self.assertTrue(result['nativeUsageRecovered'])
+        # On-disk model changes must survive a cold read without a running CLI.
+        rows=[{'type':'turn_context','payload':{'model':'old/model'}},
+              {'type':'event_msg','payload':{'type':'token_count','info':{
+                  'last_token_usage':{'input_tokens':10,'output_tokens':2},
+                  'total_token_usage':{'input_tokens':10,'output_tokens':2}}}},
+              {'type':'turn_context','payload':{'model':'new/model'}},
+              {'type':'event_msg','payload':{'type':'token_count','info':{
+                  'last_token_usage':{'input_tokens':90,'output_tokens':18},
+                  'total_token_usage':{'input_tokens':100,'output_tokens':20},'model_context_window':2000}}}]
+        rollout.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        usage=self.result('native/usage/read',{'engine':'codex','threadId':'local-history'})
+        models={m['model']:m for m in usage['tokenUsage']['byModel']}
+        self.assertEqual(models['old/model']['total']['totalTokens'],12)
+        self.assertEqual(models['new/model']['total']['totalTokens'],108)
+        self.assertEqual(usage['tokenUsage']['modelContextWindow'],2000)
         self.assertIsNone(self.result('native/usage/read',{'threadId':'missing'})['tokenUsage'])
 
 

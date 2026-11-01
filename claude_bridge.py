@@ -14,6 +14,9 @@ import subprocess
 import threading
 import time
 import uuid
+from conversation_usage import counters, add, model_id
+from native_history import delete_claude, delete_deepseek
+from native_usage import read_usage as read_native_usage
 
 
 class ClaudeBridge:
@@ -28,6 +31,7 @@ class ClaudeBridge:
         self.runs = {}
         self.models = None
         self.status_cache = None
+        self.cli_capabilities = {}
         self._native_scan_lock = threading.Lock()
         self._native_scan_running = False
         # A killed server cannot leave a task marked as running forever.
@@ -185,14 +189,90 @@ class ClaudeBridge:
     def _claude_breakdown(usage):
         if not isinstance(usage, dict):
             return {}
-        input_tokens = int(usage.get('input_tokens') or 0) + int(usage.get('cache_read_input_tokens') or 0) + int(usage.get('cache_creation_input_tokens') or 0)
-        output = int(usage.get('output_tokens') or 0)
-        return {'inputTokens': input_tokens, 'outputTokens': output,
-                'cachedInputTokens': int(usage.get('cache_read_input_tokens') or 0),
-                'reasoningOutputTokens': 0, 'totalTokens': input_tokens + output}
+        def number(key):
+            value=usage.get(key)
+            return counters({'valueTokens':value}).get('valueTokens')
+        result={}
+        if number('input_tokens') is not None:
+            result['inputTokens']=sum(number(k) or 0 for k in ('input_tokens','cache_read_input_tokens','cache_creation_input_tokens'))
+        for key,target in (('output_tokens','outputTokens'),('cache_read_input_tokens','cachedInputTokens'),('cache_creation_input_tokens','cacheWriteInputTokens')):
+            if number(key) is not None:result[target]=number(key)
+        return counters(result)
+
+    def _usage_update(self, run, result=None):
+        """Stream snapshots and final native breakdown share one frozen baseline.
+
+        Message IDs deduplicate streamed/final assistant messages. Only a result
+        commits that baseline, so a final result never bills its stream twice.
+        """
+        baseline=run.setdefault('usageBaseline',copy.deepcopy(run['data'].get('tokenUsage') or {}))
+        slots={}
+        for entry in baseline.get('byModel') or []:slots[entry.get('model') or '']=copy.deepcopy(entry)
+        if not slots and baseline.get('total'):
+            slots['']={'model':None,'total':counters(baseline['total'])}
+        increments={};lasts={}
+        for entry in run.get('usageMessages',{}).values():
+            name=entry.get('model') or ''
+            tokens=self._claude_breakdown(entry.get('usage'))
+            add(increments.setdefault(name,{}),tokens);lasts[name]=tokens
+        native=(result or {}).get('modelUsage') or {}
+        native_increments={}
+        for name,entry in native.items():
+            if not isinstance(entry,dict):continue
+            raw={target:entry[key] for key,target in (('inputTokens','input_tokens'),('outputTokens','output_tokens'),
+                ('cacheReadInputTokens','cache_read_input_tokens'),('cacheCreationInputTokens','cache_creation_input_tokens')) if key in entry}
+            tokens=self._claude_breakdown(raw)
+            if tokens:native_increments[name]=tokens
+        if result is not None:
+            aggregate=self._claude_breakdown(result.get('usage'))
+            if native_increments:
+                increments=native_increments
+                # Preserve an unattributed remainder if a gateway omits models.
+                summed={}
+                for tokens in increments.values():add(summed,tokens)
+                remainder={k:v-summed.get(k,0) for k,v in aggregate.items() if v>summed.get(k,0)}
+                if remainder:increments['']=remainder
+            elif aggregate:
+                # Without a native breakdown, multiple reported models cannot
+                # safely inherit the whole result's bill under the last model.
+                names=set(increments)
+                name=next(iter(names)) if len(names)==1 else '' if names else run['data'].get('model') or ''
+                increments={name:aggregate}
+        for name,tokens in increments.items():
+            slot=slots.setdefault(name,{'model':model_id(name),'total':{}})
+            add(slot.setdefault('total',{}),tokens)
+        for name,last in lasts.items():
+            slot=slots.setdefault(name,{'model':model_id(name),'total':{}});slot['last']=last
+        for name,entry in native.items():
+            if isinstance(entry,dict) and 'contextWindow' in entry:
+                # Capacity-only reports still identify a window, never a bill.
+                target=name if name in slots else (run.get('lastModel') or run['data'].get('model') or '') if len(native)==1 and not native_increments else name
+                slots.setdefault(target,{'model':model_id(target),'total':{}})['modelContextWindow']=entry['contextWindow']
+        total={}
+        for slot in slots.values():add(total,slot.get('total'))
+        last_model=run.get('lastModel') or run['data'].get('model') or ''
+        active=slots.get(last_model,{})
+        usage={'total':total,'last':self._claude_breakdown(run.get('lastUsage')),'modelContextWindow':active.get('modelContextWindow'),
+            'byModel':list(slots.values())}
+        run['data']['tokenUsage']=usage;run['data']['usageAt']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+        run['data']['usageModel']=last_model or None;run['data']['contextStale']=False
+        self._refresh_native_usage(run['data'])
+        usage=run['data']['tokenUsage']
+        self._save(run['data'])
+        self._notify('thread/tokenUsage/updated',{'threadId':run['data']['id'],'tokenUsage':usage,'model':last_model or None})
+        if result is not None:
+            run['usageBaseline']=copy.deepcopy(usage);run['usageMessages']={}
+
+    def _usage_message(self, run, message):
+        name=message.get('model') or run.get('lastModel') or run['data'].get('model')
+        run['lastModel']=name
+        key=message.get('id') or run.get('messageId') or 'unidentified'
+        slot=run.setdefault('usageMessages',{}).setdefault(key,{'model':name,'usage':{}})
+        slot['model']=name;slot['usage'].update(message.get('usage') or {})
+        if slot['usage']:self._usage_update(run)
 
     def _scan_native_sessions(self):
-        root = Path.home() / '.claude' / 'projects'
+        root = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude')/'projects'
         if not root.is_dir():
             return []
         found = {}
@@ -207,6 +287,73 @@ class ClaudeBridge:
             if meta and meta['nativeSession'] not in found:
                 found[meta['nativeSession']] = meta
         return list(found.values())
+
+    def _native_usage(self, data):
+        session=data.get('nativeSession')
+        if not session:return None
+        try:uuid.UUID(session)
+        except (ValueError,TypeError):return None
+        root=Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude')/'projects'
+        for path in root.glob('*/'+session+'.jsonl'):
+            if path.resolve().is_relative_to(root.resolve()):return read_native_usage(path,'claude')
+        return None
+
+    def _refresh_native_usage(self, data, checkpoint=False):
+        """Reconcile one run against frozen native/live baselines, not two bills.
+
+        Keep the checkpoint after completion: a delayed log flush can be read
+        later without adding already streamed tokens a second time.
+        """
+        if self.engine!='claude':return
+        try:native=self._native_usage(data)
+        except (OSError,ValueError):return
+        if native is None:
+            if checkpoint:data['usageRecovery']={'native':{},'usage':copy.deepcopy(data.get('tokenUsage') or {})}
+            return
+        saved=copy.deepcopy(data.get('tokenUsage') or {})
+        def groups(tokens):
+            rows=tokens.get('byModel') or []
+            if not rows and tokens.get('total'):rows=[{'model':None,'total':tokens['total']}]
+            return {entry.get('model') or '':copy.deepcopy(entry) for entry in rows}
+        slots=groups(saved);actual=groups(native['tokenUsage']);recovery=data.get('usageRecovery')
+        base=groups((recovery or {}).get('usage') or {})
+        before=groups((recovery or {}).get('native') or {})
+        # Older builds have no per-run boundary. Recover a conservative lower
+        # bound; unknown overlapping totals remain explicitly partial.
+        legacy=not recovery and bool(saved.get('total'))
+        if legacy and (not saved.get('byModel') or data.get('usageLegacyUnattributed')):
+            # Replace an unattributed old aggregate with exact native models;
+            # keep only its unrecoverable remainder, never add both bills.
+            original=data.setdefault('usageLegacyUnattributed',copy.deepcopy(saved['total']))
+            remainder={k:max(0,v-native['tokenUsage']['total'].get(k,0)) for k,v in counters(original).items()}
+            slots={}
+            if any(remainder.values()):slots['']={'model':None,'total':remainder}
+        for name,entry in actual.items():
+            slot=slots.setdefault(name,{'model':entry.get('model'),'total':{}})
+            total=counters(slot.get('total'));b=counters(base.get(name,{}).get('total'));p=counters(before.get(name,{}).get('total'))
+            for key,amount in counters(entry.get('total')).items():
+                total[key]=max(total.get(key,0),b.get(key,0)+max(0,amount-p.get(key,0)))
+            slot['total']=total
+            if entry.get('recordedAt') and self._native_time(entry['recordedAt'],0)>=self._native_time(slot.get('recordedAt') or data.get('usageAt'),0):
+                for key in ('last','recordedAt','contextStale'):
+                    if key in entry:slot[key]=copy.deepcopy(entry[key])
+        total={}
+        for slot in slots.values():add(total,slot.get('total'))
+        saved.update(total=total,byModel=list(slots.values()))
+        if native.get('recordedAt') and self._native_time(native['recordedAt'],0)>=self._native_time(data.get('usageAt'),0):
+            saved['last']=copy.deepcopy(native['tokenUsage']['last'])
+            active=slots.get(native.get('model') or '',{})
+            saved['modelContextWindow']=active.get('modelContextWindow')
+            data.update(usageAt=native['recordedAt'],usageModel=native.get('model'),contextStale=native['contextStale'])
+        if native['contextStale']:
+            data['contextStale']=True
+            if native.get('model') in slots:slots[native['model']]['contextStale']=True
+        data['tokenUsage']=saved;data['nativeUsageRecovered']=True
+        data['usagePartial']=bool(native.get('totalsPartial')) or bool(data.get('usagePartial')) or legacy and saved['total']!=native['tokenUsage']['total']
+        if checkpoint:
+            data['usageRecovery']={'native':copy.deepcopy(native['tokenUsage']),'usage':copy.deepcopy(saved)}
+            data.pop('usageLegacyUnattributed',None)
+        self._save(data)
 
     def _native_meta(self, path, stat):
         session = path.stem
@@ -259,9 +406,9 @@ class ClaudeBridge:
         turns = []
         current = None
         tools = {}
-        usage_total = {'inputTokens': 0, 'outputTokens': 0, 'cachedInputTokens': 0}
+        usage_total = {};usage_models={};seen_usage={}
         last_usage = None
-        capacity = None
+        capacity = None;capacities={}
         with path.open('r', encoding='utf-8', errors='replace') as stream:
             for line in stream:
                 try:
@@ -272,9 +419,9 @@ class ClaudeBridge:
                     continue
                 kind = row.get('type')
                 if kind == 'result':
-                    for value in (row.get('modelUsage') or {}).values():
+                    for name,value in (row.get('modelUsage') or {}).items():
                         if isinstance(value, dict) and value.get('contextWindow'):
-                            capacity = value['contextWindow']
+                            capacities[name]=value['contextWindow']
                     continue
                 message = row.get('message') if isinstance(row.get('message'), dict) else {}
                 content = message.get('content')
@@ -314,18 +461,26 @@ class ClaudeBridge:
                             tools[item['id']] = item
                     if usage:
                         last_usage = usage
-                        usage_total['inputTokens'] += int(usage.get('input_tokens') or 0) + int(usage.get('cache_read_input_tokens') or 0) + int(usage.get('cache_creation_input_tokens') or 0)
-                        usage_total['outputTokens'] += int(usage.get('output_tokens') or 0)
-                        usage_total['cachedInputTokens'] += int(usage.get('cache_read_input_tokens') or 0)
+                        normalized=self._claude_breakdown(usage);name=model_id(message.get('model'))
+                        key=message.get('id') or row.get('uuid') or str(len(seen_usage))
+                        previous=seen_usage.get(key,{})
+                        increment={k:max(0,v-previous.get(k,0)) for k,v in normalized.items()}
+                        seen_usage[key]={**previous,**normalized}
+                        add(usage_total,increment)
+                        slot=usage_models.setdefault(name or '',{'model':name,'total':{}})
+                        add(slot['total'],increment);slot['last']=normalized
+                        if name:current['model']=name
                         data['model'] = message.get('model') or data['model']
                         data['nativeLastMessage'] = row.get('uuid') or data.get('nativeLastMessage')
         data['turns'] = turns
         if turns and not data['name']:
             data['name'] = data['preview'][:48]
-        total = {key: value for key, value in usage_total.items() if value}
+        for name,slot in usage_models.items():
+            if name in capacities:slot['modelContextWindow']=capacities[name]
+        capacity=capacities.get(data.get('model'))
+        total = counters(usage_total)
         if total:
-            total['totalTokens'] = total.get('inputTokens', 0) + total.get('outputTokens', 0)
-            data['tokenUsage'] = {'total': total, 'last': self._claude_breakdown(last_usage),
+            data['tokenUsage'] = {'total': total, 'last': self._claude_breakdown(last_usage),'byModel':list(usage_models.values()),
                                   'modelContextWindow': capacity}
             data['usageAt'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         return data
@@ -352,7 +507,14 @@ class ClaudeBridge:
             for plugin in self.extensions.claude_plugins(): arguments = ['--plugin-dir',plugin] + arguments
         if getattr(self,'providers',None):
             arguments=['--settings',str(self.providers.folder/'claude-provider.json')]+arguments
-        return subprocess.Popen(self.command(cwd) + ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json',
+        command=self.command(cwd);key=tuple(command)
+        if key not in self.cli_capabilities:
+            try:
+                help_text=subprocess.run(command+['--help'],input='',capture_output=True,text=True,timeout=5,env=env).stdout
+                self.cli_capabilities[key]={'hooks':'--include-hook-events' in help_text}
+            except (OSError,subprocess.TimeoutExpired):self.cli_capabilities[key]={'hooks':False}
+        if self.cli_capabilities[key]['hooks']:arguments=['--include-hook-events']+arguments
+        return subprocess.Popen(command + ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json',
             '--verbose', '--permission-prompt-tool', 'stdio', '--include-partial-messages'] + arguments,
             cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding='utf-8', bufsize=1, start_new_session=True)
@@ -472,7 +634,11 @@ class ClaudeBridge:
                 turn = next(t for t in data['turns'] if t['id'] == params['turnId'])
                 return {'data': [{'item': item} for item in turn['items']], 'nextCursor': None}
             if method == 'usage/read':
-                return {'threadId': tid, 'tokenUsage': data.get('tokenUsage'), 'recordedAt': data.get('usageAt'), 'contextStale': False}
+                if tid in self.runs:data=self.runs[tid]['data']
+                self._refresh_native_usage(data)
+                return {'threadId': tid, 'tokenUsage': data.get('tokenUsage'), 'recordedAt': data.get('usageAt'),
+                    'model':data.get('usageModel',data.get('model')),'contextStale':bool(data.get('contextStale')),
+                    'totalsPartial':bool(data.get('usagePartial')),'nativeUsageRecovered':bool(data.get('nativeUsageRecovered'))}
             if method == 'thread/name/set':
                 data['name'] = str(params['name']); self._save(data)
                 self._notify('thread/name/updated', {'threadId': tid, 'name': data['name']}); return {}
@@ -481,9 +647,14 @@ class ClaudeBridge:
             if method in ('thread/archive', 'thread/unarchive', 'thread/delete'):
                 if tid in self.runs: raise ValueError('请先停止 Claude 任务，再归档或删除')
                 if method == 'thread/delete':
+                    if self.runs:raise ValueError('请先结束该 Agent 的任务，再完整清理原生历史')
                     native_id = data.get('nativeSession')
-                    if native_id: self._ignore_native(native_id)
-                    self._path(tid).unlink(); return {}
+                    native_ids=list(dict.fromkeys((data.get('nativeSessions',[]) if self.engine=='deepseek' else [])+[native_id]))
+                    for native in native_ids:
+                        if native:
+                            (delete_claude if self.engine=='claude' else delete_deepseek)(native,tid)
+                            self._ignore_native(native)
+                    self._path(tid).unlink(missing_ok=True); return {'deleted':True}
                 data['archived'] = method == 'thread/archive'; self._save(data); return {}
             if method in ('thread/revert', 'thread/fork'):
                 if tid in self.runs: raise ValueError('请先停止 Claude 任务')
@@ -502,7 +673,9 @@ class ClaudeBridge:
                 else:
                     data.pop('resumeFrom', None); data.pop('resumeAt', None)
                 data['nativeSession'] = str(uuid.uuid4()); data['nativeStarted'] = False
-                data['turns'] = turns; data.pop('tokenUsage', None); self._save(data)
+                data['turns'] = turns
+                for key in ('tokenUsage','usageRecovery','usageLegacyUnattributed','nativeUsageRecovered','usageModel','usagePartial','usageAt','contextStale'):data.pop(key,None)
+                self._save(data)
                 if method == 'thread/revert': self._notify('thread/reverted', {'threadId': tid})
                 return {'thread': self._thread(data)}
             if method == 'turn/start':
@@ -567,6 +740,7 @@ class ClaudeBridge:
         if tid in self.runs: raise ValueError('Claude 正在运行，请排队或插入引导')
         if data.get('archived'): raise ValueError('请先恢复已归档的会话')
         self._content(params['input'])  # Validate attachments before creating the turn/process.
+        self._refresh_native_usage(data,checkpoint=True)
         arguments = ['--model', params.get('model') or data['model'], '--effort', params.get('effort') or 'high', '--permission-mode', 'plan' if data.get('sandbox') == 'read-only' else 'manual', '--system-prompt-snapshot', 'off']
         instructions = data.get('developerInstructions') or ''
         if instructions:
@@ -580,9 +754,10 @@ class ClaudeBridge:
         turn = {'id': 'ct-'+uuid.uuid4().hex, 'status': 'inProgress', 'items': []}
         data['turns'].append(turn); data['model'] = params.get('model') or data['model']; data['updatedAt'] = time.time()
         if not data['preview']: data['preview'] = next((p['text'][:100] for p in params['input'] if p['type']=='text'), '图片消息')
-        run = {'process': process, 'data': data, 'turn': turn, 'writeLock': threading.Lock(), 'stopping': False, 'initialParams': params, 'stderr': deque_tail(), 'blocks': {}, 'ready': False}
+        run = {'process': process, 'data': data, 'turn': turn, 'writeLock': threading.Lock(), 'stopping': False, 'initialParams': params, 'stderr': deque_tail(), 'blocks': {}, 'ready': False,
+            'usageBaseline':copy.deepcopy(data.get('tokenUsage') or {})}
         self.runs[tid] = run; self._save(data)
-        self._notify('turn/started', {'threadId': tid, 'turn': copy.deepcopy(turn)})
+        self._notify('turn/started', {'threadId': tid, 'turn': copy.deepcopy(turn), 'cwd':data['cwd']})
         self._progress(run,'starting')
         threading.Thread(target=self._read_loop, args=(run,), daemon=True).start()
         threading.Thread(target=self._stderr, args=(run,), daemon=True).start()
@@ -623,13 +798,36 @@ class ClaudeBridge:
                     self._finish(run, 'interrupted' if run['stopping'] else 'failed', ''.join(run['stderr'])[-1500:] or 'Claude 意外退出')
 
     def _item(self, run, item):
+        item = dict(item)
+        item.setdefault('status', 'completed')
+        if 'arguments' in item:item.setdefault('partialInput','')
+        if item.get('parentToolUseId') and item.get('type')=='agentMessage':item['type']='subagentMessage'
+        if self.engine=='claude' and item.get('parentToolUseId'):
+            parent=item['parentToolUseId']
+            item.update(nativeChild=True,sourceEngine='claude',sourceThreadId=parent,sourceTurnId=run['turn']['id'],
+                sourceModel=run.get('childModels',{}).get(parent))
         prior = next((i for i in run['turn']['items'] if i['id']==item['id']), None)
         if prior: prior.update(item)
         else: run['turn']['items'].append(item)
-        self._notify('item/completed', {'threadId': run['data']['id'], 'turnId': run['turn']['id'], 'item': item})
+        method = 'item/started' if item['status'] in ('inProgress','pending','in_progress') else 'item/completed'
+        self._notify(method, {'threadId': run['data']['id'], 'turnId': run['turn']['id'], 'item': copy.deepcopy(prior if prior else item)})
+        return prior if prior else item
+
+    def _discard_drafts(self, run, stream=None):
+        for item in (stream.get('blocks',{}).values() if stream is not None else run['turn']['items']):
+            if item.get('type')=='toolCallDraft':
+                item.update(type='runtimeStatus',status='discarded',
+                            tool='工具准备中断 · '+item.get('tool','工具')+' · 未执行',
+                            progressMessage='参数生成未提交执行')
+                self._item(run,item)
 
     def _handle(self, run, message):
         kind = message.get('type'); tid = run['data']['id']; turnid = run['turn']['id']
+        parent=message.get('parent_tool_use_id')
+        if parent:
+            model=(message.get('message') or message.get('event',{}).get('message') or {}).get('model')
+            if model:run.setdefault('childModels',{})[parent]=model
+        stream=run if not parent else run.setdefault('childStreams',{}).setdefault(parent,{'blocks':{},'toolJson':{}})
         if kind == 'control_response':
             response = message.get('response', {})
             if response.get('request_id') == 'initialize':
@@ -639,23 +837,72 @@ class ClaudeBridge:
                 self._progress(run,'waiting')
         elif kind == 'system':
             subtype=message.get('subtype')
-            if subtype=='api_retry':
+            if subtype in ('hook_started','hook_response','hook_progress'):
+                iid='claude-hook:'+str(message.get('hook_id') or message.get('id') or message.get('hook_name') or message.get('hook_event') or 'unknown')
+                prior=next((i for i in run['turn']['items'] if i['id']==iid),{})
+                failed=message.get('exit_code') not in (None,0) or message.get('outcome') in ('error','failed','blocked')
+                item=dict(prior) if prior else {'id':iid,'type':'hook','tool':message.get('hook_event') or message.get('hook_event_name') or message.get('hook_name') or 'Hook'}
+                item['status']='inProgress' if subtype!='hook_response' else 'failed' if failed else 'completed'
+                detail=message.get('output') or message.get('stdout') or message.get('stderr') or message.get('message')
+                if detail:item['progressMessage']=str(detail)
+                if parent:item['parentToolUseId']=parent
+                self._item(run,item)
+            elif subtype=='api_retry':
                 self._progress(run,'retrying',attempt=message.get('attempt'),maxRetries=message.get('max_retries'),
                     retryDelayMs=message.get('retry_delay_ms'),httpStatus=message.get('error_status'))
+            elif subtype in ('task_started','task_progress','task_notification','task_updated'):
+                taskid=message.get('task_id')
+                if taskid:
+                    patch=message.get('patch') if subtype=='task_updated' else message
+                    patch=patch if isinstance(patch,dict) else {}
+                    iid='claude-task:'+str(taskid)
+                    prior=next((i for i in run['turn']['items'] if i['id']==iid),{})
+                    item=dict(prior) if prior else {'id':iid,'type':'taskProgress',
+                        'tool':'子任务' if 'agent' in str(message.get('task_type','')) else '后台任务',
+                        'progressMessage':'执行子任务','status':'inProgress'}
+                    status=patch.get('status')
+                    if status:item['status']={'running':'inProgress','in_progress':'inProgress','pending':'pending',
+                        'completed':'completed','succeeded':'completed','failed':'failed','error':'failed',
+                        'stopped':'interrupted','cancelled':'interrupted'}.get(status,status)
+                    detail=patch.get('summary') or patch.get('description') or patch.get('last_tool_name')
+                    if detail:item['progressMessage']=detail
+                    for key in ('result','error'):
+                        if patch.get(key) is not None:item[key]=copy.deepcopy(patch[key])
+                    if message.get('tool_use_id'):item['parentToolUseId']=message['tool_use_id']
+                    self._item(run,item)
+                    child_parent=item.get('parentToolUseId')
+                    if item.get('status')=='completed' and child_parent and detail and not any(
+                            i.get('type')=='subagentMessage' and i.get('parentToolUseId')==child_parent for i in run['turn']['items']):
+                        self._item(run,{'id':iid+':summary','type':'subagentMessage','text':str(detail),
+                            'summaryOnly':True,'parentToolUseId':child_parent,'status':'completed'})
+                    self._progress(run,'tool' if item['status'] in ('inProgress','pending') else 'waiting',item['tool'])
+                    pending=run.get('pendingCompletion')
+                    if pending and not any(i.get('type')=='taskProgress' and i.get('status') in ('inProgress','pending','running') for i in run['turn']['items']):
+                        run.pop('pendingCompletion',None);self._finish(run,*pending)
             elif subtype=='status':
                 phase={'requesting':'waiting','compacting':'compacting','thinking':'thinking'}.get(message.get('status'))
                 if phase:self._progress(run,phase)
         elif kind == 'tool_progress':
-            item=next((i for i in run['turn']['items'] if i['id']==message.get('tool_use_id')),None)
-            if item:
-                item['elapsedSeconds']=message.get('elapsed_time_seconds',0)
-                self._notify('item/started',{'threadId':tid,'turnId':turnid,'item':copy.deepcopy(item)})
+            iid=message.get('tool_use_id')
+            if iid:
+                item=next((i for i in run['turn']['items'] if i['id']==iid),None)
+                if item is None:
+                    item={'id':iid,'type':'dynamicToolCall','tool':message.get('tool_name') or '工具','status':'inProgress'}
+                if item.get('status','inProgress')=='inProgress':
+                    if item.get('type')=='toolCallDraft':item['type']='commandExecution' if item.get('tool') in ('Bash','PowerShell') else 'dynamicToolCall'
+                    item['elapsedSeconds']=message.get('elapsed_time_seconds',0)
+                    item['progressMessage']='执行中 · '+str(item['elapsedSeconds'])+' 秒'
+                    if parent:item['parentToolUseId']=parent
+                    self._item(run,item)
             self._progress(run,'tool',str(message.get('tool_name') or '工具')[:100])
         elif kind == 'control_request':
             request = message['request']; rid = message['request_id']
             if request.get('subtype') != 'can_use_tool':
                 self._write(run, {'type':'control_response','response':{'subtype':'error','request_id':rid,'error':'Unsupported control request'}}); return
             tool = request.get('tool_name'); inputs = request.get('input', {})
+            iid=request.get('tool_use_id')
+            if iid:self._item(run,{'id':iid,'type':'commandExecution' if tool in ('Bash','PowerShell') else 'dynamicToolCall',
+                'tool':tool,'arguments':copy.deepcopy(inputs),'command':inputs.get('command',tool),'status':'inProgress'})
             if tool != 'AskUserQuestion' and run['data'].get('permissionMode') == 'auto':
                 self._write(run, {'type':'control_response','response':{'subtype':'success','request_id':rid,
                     'response':{'behavior':'allow','updatedInput':inputs}}})
@@ -677,31 +924,34 @@ class ClaudeBridge:
             self.app._emit({'type':'approval','id':approval_id,'method':method,'params':params})
         elif kind == 'control_cancel_request':
             self._clear_requests(run, message.get('request_id'))
-        elif kind == 'stream_event' and not message.get('parent_tool_use_id'):
+        elif kind == 'stream_event':
             event = message.get('event', {}); index = event.get('index', 0)
             if event.get('type') == 'message_start':
-                run['messageId'] = event.get('message', {}).get('id', uuid.uuid4().hex); run['blocks'] = {}
-                run['lastUsage'] = dict(event.get('message', {}).get('usage') or {})
+                self._discard_drafts(run,stream)
+                stream['messageId'] = event.get('message', {}).get('id', uuid.uuid4().hex); stream['blocks'] = {}
+                if not parent:run['lastUsage'] = dict(event.get('message', {}).get('usage') or {})
+                if not parent:self._usage_message(run,event.get('message',{}))
                 self._progress(run,'receiving')
             elif event.get('type') == 'message_delta':
-                run.setdefault('lastUsage', {}).update(event.get('usage') or {})
+                if not parent:run.setdefault('lastUsage', {}).update(event.get('usage') or {})
+                if not parent:self._usage_message(run,{'id':stream.get('messageId'),'usage':event.get('usage') or {}})
             elif event.get('type') == 'content_block_start':
-                block = event.get('content_block', {}); iid = run.get('messageId','stream')+'-'+str(index)
+                block = event.get('content_block', {}); iid = stream.get('messageId','stream')+'-'+str(index)
                 if block.get('type') in ('text','thinking'):
-                    item = {'id':iid, 'type':'reasoning' if block['type']=='thinking' else 'agentMessage', **({'summary':[], 'content':[]} if block['type']=='thinking' else {'text':block.get('text','')})}
-                    run['blocks'][index] = item; run['turn']['items'].append(item)
-                    self._notify('item/started', {'threadId':tid,'turnId':turnid,'item':copy.deepcopy(item)})
+                    item = {'id':iid, 'type':'reasoning' if block['type']=='thinking' else 'agentMessage', 'status':'inProgress', **({'summary':[], 'content':[block.get('thinking','')]} if block['type']=='thinking' else {'text':block.get('text','')})}
+                    if parent:item['parentToolUseId']=parent
+                    stream['blocks'][index] = self._item(run,item)
                     self._progress(run,'thinking' if block['type']=='thinking' else 'responding')
-                elif block.get('type')=='tool_use':
+                elif block.get('type') in ('tool_use','server_tool_use'):
                     tool=block.get('name','工具')
-                    item={'id':block['id'],'type':'commandExecution' if tool in ('Bash','PowerShell') else 'dynamicToolCall',
+                    item={'id':block['id'],'type':'toolCallDraft',
                         'tool':tool,'arguments':block.get('input',{}),'command':tool,'status':'inProgress'}
-                    run['blocks'][index]=item;run['turn']['items'].append(item)
-                    run.setdefault('toolJson',{})[index]=''
-                    self._notify('item/started',{'threadId':tid,'turnId':turnid,'item':copy.deepcopy(item)})
+                    if parent:item['parentToolUseId']=parent
+                    stream.setdefault('toolJson',{})[index]=''
+                    stream['blocks'][index]=self._item(run,item)
                     self._progress(run,'preparingTool',tool)
             elif event.get('type') == 'content_block_delta':
-                item = run['blocks'].get(index); delta = event.get('delta', {})
+                item = stream['blocks'].get(index); delta = event.get('delta', {})
                 if item and delta.get('type') in ('text_delta','thinking_delta'):
                     text = delta.get('text',delta.get('thinking',''))
                     if item['type']=='reasoning': item['content'] = [(item['content'][0] if item['content'] else '')+text]
@@ -709,47 +959,74 @@ class ClaudeBridge:
                     self._progress(run,'thinking' if item['type']=='reasoning' else 'responding')
                     self._notify('item/reasoning/textDelta' if item['type']=='reasoning' else 'item/agentMessage/delta', {'threadId':tid,'turnId':turnid,'itemId':item['id'],'contentIndex':0,'delta':text})
                 elif item and delta.get('type')=='input_json_delta':
-                    run.setdefault('toolJson',{})[index]=run.get('toolJson',{}).get(index,'')+delta.get('partial_json','')
-                    try:inputs=json.loads(run['toolJson'][index])
+                    stream.setdefault('toolJson',{})[index]=stream.get('toolJson',{}).get(index,'')+delta.get('partial_json','')
+                    item['partialInput']=stream['toolJson'][index]
+                    self._notify('item/started',{'threadId':tid,'turnId':turnid,'item':copy.deepcopy(item)})
+                    try:inputs=json.loads(stream['toolJson'][index])
                     except ValueError:return
                     if isinstance(inputs,dict):
                         item['arguments']=inputs;item['command']=inputs.get('command',item['tool'])
+                        item['partialInput']=''
                         self._notify('item/started',{'threadId':tid,'turnId':turnid,'item':copy.deepcopy(item)})
             elif event.get('type')=='content_block_stop':
-                item=run.get('blocks',{}).get(index)
+                item=stream.get('blocks',{}).get(index)
                 if item and item.get('tool'):self._progress(run,'tool',item['tool'])
-        elif kind == 'assistant' and not message.get('parent_tool_use_id'):
-            run['turn']['nativeLastMessage'] = message.get('uuid')
+                elif item:
+                    item['status']='completed';self._item(run,item)
+        elif kind == 'assistant':
+            if not parent:run['turn']['nativeLastMessage'] = message.get('uuid')
             msg = message.get('message', {})
-            if msg.get('usage'): run['lastUsage'] = msg['usage']
+            if msg.get('usage') and not parent:run['lastUsage'] = msg['usage']
+            if not parent:self._usage_message(run,msg)
+            before=len(run['turn']['items'])
             for index,block in enumerate(msg.get('content', [])):
                 iid = msg.get('id',message.get('uuid',uuid.uuid4().hex))+'-'+str(index)
-                if block.get('type')=='text': self._item(run, {'id':iid,'type':'agentMessage','text':block['text']})
-                elif block.get('type')=='thinking': self._item(run, {'id':iid,'type':'reasoning','summary':[],'content':[block.get('thinking','')]})
-                elif block.get('type')=='tool_use':
+                if block.get('type') in ('text','thinking'):
+                    expected=('agentMessage','subagentMessage') if block['type']=='text' else ('reasoning',)
+                    # CLI may emit one assistant snapshot per content block;
+                    # enumerate(content) then resets to zero for every block.
+                    base=msg.get('id',message.get('uuid',''))+'-'
+                    candidates=[i for i in run['turn']['items'] if i['id'].startswith(base) and i.get('type') in expected]
+                    current=next((i for i in run['turn']['items'] if i['id']==iid),None)
+                    if len(msg.get('content',[]))==1 and candidates:
+                        value=block.get('text',block.get('thinking',''))
+                        match=next((i for i in candidates if (i.get('text') if block['type']=='text' else (i.get('content') or [''])[0])==value),None)
+                        iid=(match or candidates[-1])['id']
+                    elif current and current.get('type') not in expected:iid=base+block['type']+'-'+str(index)
+                meta={'parentToolUseId':parent} if parent else {}
+                if block.get('type')=='text': self._item(run, {'id':iid,'type':'agentMessage','text':block['text'],**meta})
+                elif block.get('type')=='thinking': self._item(run, {'id':iid,'type':'reasoning','summary':[],'content':[block.get('thinking','')],**meta})
+                elif block.get('type') in ('tool_use','server_tool_use'):
                     tool = block.get('name'); inp = block.get('input',{})
-                    self._item(run, {'id':block['id'],'type':'commandExecution' if tool in ('Bash','PowerShell') else 'dynamicToolCall','tool':tool,'arguments':inp,'command':inp.get('command',tool),'status':'inProgress'})
+                    self._item(run, {'id':block['id'],'type':'commandExecution' if tool in ('Bash','PowerShell') else 'dynamicToolCall','tool':tool,'arguments':inp,'command':inp.get('command',tool),'status':'inProgress',**meta})
                     self._progress(run,'tool',tool)
+                elif block.get('type') in ('tool_result','advisor_tool_result') or str(block.get('type','')).endswith('_tool_result'):
+                    item=next((i for i in run['turn']['items'] if i['id']==block.get('tool_use_id')),None)
+                    if item:
+                        item.update(type='dynamicToolCall',status='failed' if block.get('is_error') else 'completed',result=block.get('content'),partialInput='',progressMessage='')
+                        self._item(run,item)
+            if parent:
+                for child in run['turn']['items'][before:]:child['parentToolUseId']=parent
             self._save(run['data'])
         elif kind == 'user':
             for block in message.get('message',{}).get('content',[]) if isinstance(message.get('message',{}).get('content'),list) else []:
                 if block.get('type')=='tool_result':
                     item = next((i for i in run['turn']['items'] if i['id']==block.get('tool_use_id')),None)
                     if item:
+                        item['type']='commandExecution' if item.get('tool') in ('Bash','PowerShell') else 'dynamicToolCall'
+                        item['partialInput']='';item['progressMessage']=''
                         item.update({'status':'failed' if block.get('is_error') else 'completed', 'aggregatedOutput':block.get('content') if isinstance(block.get('content'),str) else json.dumps(block.get('content'),ensure_ascii=False),'result':block.get('content')}); self._item(run,item)
                         self._progress(run,'waiting')
+        elif kind == 'rate_limit_event':
+            info=message.get('rate_limit_info') or {};status=info.get('status','unknown')
+            self._item(run,{'id':'claude-rate-limit','type':'runtimeStatus','tool':'API 用量限制',
+                'status':'failed' if status in ('rejected','blocked') else 'completed',
+                'text':json.dumps({k:info[k] for k in ('status','resetsAt','rateLimitType','utilization','overageStatus','overageDisabledReason') if k in info},ensure_ascii=False)})
+        elif kind == 'conversation_reset':
+            if message.get('new_conversation_id'):run['data']['nativeSession']=message['new_conversation_id']
+            self._item(run,{'id':'claude-context-reset','type':'runtimeStatus','tool':'上下文已重置','status':'completed'})
         elif kind == 'result':
-            usage = message.get('usage') or {}; model_usage = message.get('modelUsage') or {}
-            def breakdown(value):
-                tokens = {'inputTokens':value.get('input_tokens',0)+value.get('cache_read_input_tokens',0)+value.get('cache_creation_input_tokens',0),'outputTokens':value.get('output_tokens',0),'cachedInputTokens':value.get('cache_read_input_tokens',0)}
-                tokens['totalTokens']=tokens['inputTokens']+tokens['outputTokens']; return tokens
-            last = breakdown(run['lastUsage']) if run.get('lastUsage') else {}
-            increment = breakdown(usage)
-            previous = run['data'].get('tokenUsage',{}).get('total',{})
-            total = {key:previous.get(key,0)+value for key,value in increment.items()}
-            capacity = next((u.get('contextWindow') for u in model_usage.values() if u.get('contextWindow')),None)
-            run['data']['tokenUsage'] = {'total':total,'last':last,'modelContextWindow':capacity}; run['data']['usageAt']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
-            self._notify('thread/tokenUsage/updated', {'threadId':tid,'tokenUsage':run['data']['tokenUsage']})
+            self._usage_update(run,message)
             if run.get('guidance') and not run['stopping']:
                 guidance = run.pop('guidance'); self._clear_requests(run)
                 self._send_input(run, {'input':[part for entry in guidance for part in entry['input']]}, record=False)
@@ -784,10 +1061,22 @@ class ClaudeBridge:
     def _finish(self, run, status, error=None, cleanup=True):
         tid = run['data']['id']
         if self.runs.get(tid) is not run: return
+        if self.engine=='claude' and status=='completed' and any(i.get('type')=='taskProgress' and i.get('status') in ('inProgress','pending','running') for i in run['turn']['items']):
+            run['pendingCompletion']=(status,error,cleanup);self._progress(run,'tool','等待后台任务完成');return
+        self._discard_drafts(run)
+        prior_usage=copy.deepcopy(run['data'].get('tokenUsage'))
+        self._refresh_native_usage(run['data'])
         run['turn']['status']=status
+        for item in run['turn'].get('items',[]):
+            if item.get('status') in ('inProgress','pending','in_progress'):
+                item['status']='completed' if status=='completed' else status
         if error and status != 'interrupted': run['turn']['error']={'message':error}
         run['data']['updatedAt']=time.time(); self._save(run['data']); self._clear_requests(run)
         self.runs.pop(tid,None)
+        if run['data'].get('tokenUsage')!=prior_usage:
+            self._notify('thread/tokenUsage/updated',{'threadId':tid,'tokenUsage':copy.deepcopy(run['data']['tokenUsage']),
+                'model':run['data'].get('usageModel',run['data'].get('model')),'totalsPartial':bool(run['data'].get('usagePartial')),
+                'contextStale':bool(run['data'].get('contextStale'))})
         self._notify('turn/completed', {'threadId':tid,'turn':copy.deepcopy(run['turn'])})
         if cleanup: threading.Thread(target=self._kill,args=(run['process'],),daemon=True).start()
 

@@ -33,12 +33,13 @@ class RpcProcess:
             self.process.stdin.write(json.dumps(message, ensure_ascii=False)+'\n')
             self.process.stdin.flush()
 
-    def request(self, method, params, timeout=45):
+    def request(self, method, params, timeout=45, on_sent=None):
         with self.lock:
             self.next_id += 1; ident = self.next_id
             result = queue.Queue(maxsize=1); self.pending[ident] = result
         try:
             self.write({'jsonrpc':'2.0','id':ident,'method':method,'params':params})
+            if on_sent:on_sent()
             try: message = result.get(timeout=timeout)
             except queue.Empty as error: raise RuntimeError('助手接口超时：'+method) from error
             if 'error' in message: raise RuntimeError(str(message['error'].get('message', message['error'])))

@@ -14,6 +14,9 @@ android/build/
 dist/
 __pycache__/
 *.pyc
+.pytest_cache/
+.DS_Store
+docs/verify/
 android/.gradle/
 android/local.properties
 android/app/build/

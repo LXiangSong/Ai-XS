@@ -20,6 +20,7 @@ class CollaborationStore:
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.folder/'collaboration.sqlite', check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL'); self.db.execute('PRAGMA synchronous=FULL')
+        self.db.execute('PRAGMA secure_delete=ON')
         self.db.executescript('''CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
             request_id TEXT UNIQUE NOT NULL, updated REAL NOT NULL, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
@@ -75,3 +76,9 @@ class CollaborationStore:
 
     def close(self):
         with self.lock:self.db.close()
+
+    def delete(self, keys):
+        with self.lock:
+            with self.db:self.db.executemany('DELETE FROM documents WHERE id=?',[(key,) for key in keys])
+            if self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+                raise RuntimeError('协作数据库日志仍在使用，清理尚未完成，请稍后重试')

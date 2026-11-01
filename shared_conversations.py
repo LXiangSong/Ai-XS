@@ -3,12 +3,27 @@ from collections import OrderedDict
 import copy
 import hashlib
 import json
+import math
+from datetime import datetime
 from pathlib import Path
 import threading
 import time
 import uuid
 
+from conversation_usage import record as record_model_usage, breakdown as model_usage_breakdown
+from realtime_events import apply as apply_live_event, settle as settle_live_items
+
 ENGINES=('codex','claude','deepseek')
+
+
+def timestamp_seconds(value):
+    if isinstance(value,str):
+        try:value=float(value)
+        except ValueError:
+            try:value=datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+            except (ValueError,OverflowError):return None
+    if not isinstance(value,(int,float)) or isinstance(value,bool) or not math.isfinite(value) or value<=0:return None
+    return value/1000 if value>=100000000000 else value
 
 
 class SharedConversations:
@@ -16,6 +31,7 @@ class SharedConversations:
         self.folder=Path(folder);self.folder.mkdir(mode=0o700,parents=True,exist_ok=True)
         self.call,self.read_native,self.native_usage,self.default_permission=call,read_native,usage,permission
         self.lock=threading.RLock();self.cache=OrderedDict();self.busy=set()
+        self.deleting=set();self.live_saves={}
         path=self.folder/'index.json'
         self.index=json.loads(path.read_text()) if path.exists() else {}
         self.owners={child['threadId']:(ident,child['engine']) for ident,row in self.index.items()
@@ -105,6 +121,7 @@ class SharedConversations:
         with self.lock:value=copy.deepcopy(doc)
         for key in ('binding','permissions','children'):value.pop(key,None)
         value.pop('usageSnapshots',None)
+        value.pop('normalRequests',None)
         value['usage']=self.usage_view(doc)
         value['agents']=list(dict.fromkeys([turn.get('engine',doc['engine']) for turn in doc['turns']]+[doc['engine']]))
         return value
@@ -118,6 +135,7 @@ class SharedConversations:
 
     def handle(self, method, params):
         engine=self._engine(params.get('engine','codex'))
+        if method=='thread/delete':return self.delete(params)
         if method=='thread/start':
             doc=self._new(params)
             with self.lock:self._save(doc)
@@ -146,10 +164,6 @@ class SharedConversations:
             self._idle(doc)
             if method=='thread/name/set':doc['name']=str(params['name'])
             elif method in ('thread/archive','thread/unarchive'):doc['archived']=method.endswith('/archive')
-            elif method=='thread/delete':
-                self.cache.pop(doc['id'],None);self.index[doc['id']]['deleted']=True
-                self._write(self.folder/'index.json',self.index);self._path(doc['id']).unlink(missing_ok=True)
-                return {}
             elif method in ('thread/fork','thread/revert'):
                 target=params.get('beforeTurnId') if method=='thread/revert' else params.get('lastTurnId')
                 if target:
@@ -159,11 +173,50 @@ class SharedConversations:
                 else:end=len(doc['turns'])
                 if method=='thread/fork':
                     doc=copy.deepcopy(doc);doc.update(id='aixs-'+str(uuid.uuid4()),children=[],forkedFromId=doc['id'],createdAt=time.time())
+                    doc.pop('messageQueue',None);doc.pop('messageQueuePaused',None)
+                    doc.pop('normalRequests',None)
+                    doc.pop('executionControl',None)
                     doc['name']=(doc['name'] or doc['preview'] or '会话')+' · 分叉'
-                doc['turns']=doc['turns'][:end];doc['binding']=None
+                doc['turns']=doc['turns'][:end];doc['binding']=None;doc.pop('executionControl',None)
             else:raise ValueError('不支持的共享会话操作：'+method)
             doc['updatedAt']=time.time();self._save(doc)
             return {'thread':self.view(doc)} if method in ('thread/fork','thread/revert') else {}
+
+    def deletion_doc(self, ident):
+        with self.lock:
+            row=self.index.get(ident,{})
+            if not row.get('deleted'):return self.adopt(ident)
+            if row.get('deletionComplete'):return None
+            # Older releases only hid these native children. An explicit retry
+            # must clean them too instead of claiming the old hide was deletion.
+            doc=copy.deepcopy(row);doc.update(turns=[],binding=None)
+            return doc
+
+    def delete(self, params, cleanup=None):
+        ident=str(params.get('threadId') or '')
+        with self.lock:
+            doc=self.deletion_doc(ident)
+            if doc is None:return {'deleted':True,'threadId':ident}
+            ident=doc['id'];self._idle(doc);self.busy.add(ident);self.deleting.add(ident)
+            children=copy.deepcopy(doc['children'])
+        try:
+            for child in children:
+                if child['threadId'] in doc.get('deletedNativeSources',[]):continue
+                try:self.call('thread/delete',{'engine':child['engine'],'threadId':child['threadId']})
+                except Exception as error:raise RuntimeError('原生会话清理失败，未标记删除成功：'+str(error)) from error
+                with self.lock:
+                    doc.setdefault('deletedNativeSources',[]).append(child['threadId'])
+                    if (doc.get('binding') or {}).get('threadId')==child['threadId']:doc['binding']=None
+                    self._save(doc)
+            if cleanup:cleanup(doc)
+            with self.lock:
+                self._path(ident).unlink(missing_ok=True);self.cache.pop(ident,None)
+                # Opaque IDs suppress already-cached native rows; no history remains.
+                self.index[ident]={'id':ident,'deleted':True,'deletionComplete':True,'children':children}
+                self._write(self.folder/'index.json',self.index)
+            return {'deleted':True,'threadId':ident,'nativeSessionsDeleted':len(children)}
+        finally:
+            with self.lock:self.busy.discard(ident);self.deleting.discard(ident)
 
     def permissions(self, method, params):
         doc=self.adopt(params['threadId'])
@@ -181,8 +234,8 @@ class SharedConversations:
         if doc is None:return {'threadId':params['threadId'],'tokenUsage':None}
         with self.lock:
             binding=copy.deepcopy(doc['binding']);snapshots=doc.get('usageSnapshots',{})
-            children=[copy.deepcopy(c) for c in doc['children'] if c['threadId'] not in snapshots or c=={
-                'engine':(binding or {}).get('engine'),'threadId':(binding or {}).get('threadId')}]
+            children=[copy.deepcopy(c) for c in doc['children'] if c['threadId'] not in snapshots or c['threadId']==(binding or {}).get('threadId') or
+                c['engine'] in ('deepseek','claude','codex') and not snapshots.get(c['threadId'],{}).get('nativeUsageRecovered')]
         # Private history reads never start a CLI, including Codex's local rollout read.
         for child in children:
             try:value=self.native_usage(child)
@@ -194,33 +247,22 @@ class SharedConversations:
                 self._save(doc)
         return self.usage_view(doc)
 
-    def record_usage(self, doc, engine, native_id, value):
-        snapshots=doc.setdefault('usageSnapshots',{})
-        # A native cumulative counter replaces its own snapshot; never add it twice.
-        snapshots[native_id]=dict(copy.deepcopy(value),engine=engine,updatedAt=time.time())
+    def record_usage(self, doc, engine, native_id, value, model=None, metadata=None):
+        return record_model_usage(doc,engine,native_id,value,model,metadata)
 
     def usage_view(self, doc):
         with self.lock:
             snapshots=copy.deepcopy(doc.get('usageSnapshots',{}));binding=copy.deepcopy(doc.get('binding'))
             engine=doc['engine'];ident=doc['id'];count=len(doc['turns']);running=self._running(doc)
-        total={};by_engine={};partial=False
-        for row in snapshots.values():
-            counters=(row.get('tokenUsage') or {}).get('total') or {}
-            if not counters:partial=True;continue
-            if 'totalTokens' not in counters:counters['totalTokens']=counters.get('inputTokens',0)+counters.get('outputTokens',0)
-            subtotal=by_engine.setdefault(row['engine'],{})
-            for key,value in counters.items():
-                if isinstance(value,(int,float)) and not isinstance(value,bool):
-                    total[key]=total.get(key,0)+value;subtotal[key]=subtotal.get(key,0)+value
+            details=model_usage_breakdown(doc)
         current=snapshots.get((binding or {}).get('threadId'))
         if current is None and snapshots:current=max(snapshots.values(),key=lambda row:row.get('updatedAt',0))
         tokens=copy.deepcopy((current or {}).get('tokenUsage') or {})
-        tokens['total']=total
+        tokens.pop('byModel',None);tokens['total']=details.pop('total')
         pending=bool(count and (not binding or binding['engine']!=engine or binding['through']!=count and not running))
-        return {'threadId':ident,'tokenUsage':tokens,'contextPending':pending,
-                'contextEngine':(current or {}).get('engine',engine),'totalsPartial':partial,
-                'byEngine':by_engine,'recordedAt':(current or {}).get('recordedAt'),
-                'contextStale':bool((current or {}).get('contextStale'))}
+        return dict(details,threadId=ident,tokenUsage=tokens,contextPending=pending,
+            contextEngine=(current or {}).get('engine',engine),contextModel=(current or {}).get('model'),
+            recordedAt=(current or {}).get('recordedAt'),contextStale=bool((current or {}).get('contextStale')))
 
     def handoff(self, doc):
         parts=[]
@@ -235,7 +277,9 @@ class SharedConversations:
                         if block.get('type')=='text':texts.append(block.get('text',''))
                         else:texts.append('[历史附件：'+str(block.get('path') or block.get('url') or block.get('type','附件'))[:500]+']')
                     parts.append('用户：'+'\n'.join(texts))
-                elif kind=='agentMessage':parts.append('助手：'+str(item.get('text') or item.get('content') or ''))
+                elif kind=='agentMessage':
+                    source=' · '.join(str(item.get(k,'')) for k in ('participant','engine','model') if item.get(k))
+                    parts.append('助手'+('（'+source+'）' if source else '')+'：'+str(item.get('text') or item.get('content') or ''))
                 else:
                     parts.append('工具记录 '+kind+'：'+json.dumps(item,ensure_ascii=False)[:6000])
         transcript='\n'.join(parts)
@@ -267,7 +311,14 @@ class SharedConversations:
             backup=copy.deepcopy(doc)
             backup.update(id='aixs-'+str(uuid.uuid4()),children=[],binding=None,forkedFromId=ident,
                           name=(doc['name'] or doc['preview'] or '会话')[:100]+' · 编辑前',createdAt=time.time(),updatedAt=time.time())
+            backup.pop('messageQueue',None);backup.pop('messageQueuePaused',None)
+            backup.pop('normalRequests',None)
+            backup.pop('executionControl',None)
             self._save(backup)
+            # Completed collaboration rounds after the edit belong to the backup branch.
+            excluded=set(doc.get('collaborationExcludedWorkflows',[]))
+            excluded.update(t['workflowId'] for t in doc['turns'][position:] if t.get('workflowId'))
+            if excluded:doc['collaborationExcludedWorkflows']=sorted(excluded)
             doc['turns']=copy.deepcopy(doc['turns'][:position])
             # A steer can add a second user item inside a turn. Keep its earlier context.
             if item_index:
@@ -306,17 +357,26 @@ class SharedConversations:
                 result=self.call('thread/start',{'engine':engine,'cwd':doc['cwd'],'model':model,
                     **({'developerInstructions':context} if context else {})})
                 native_id=result['thread']['id']
-                binding={'engine':engine,'threadId':native_id,'through':len(doc['turns']),'instructions':context or None}
+                binding={'engine':engine,'threadId':native_id,'model':model,'through':len(doc['turns']),'instructions':context or None}
                 with self.lock:
-                    doc['binding']=binding;doc['children'].append({'engine':engine,'threadId':native_id})
+                    doc['binding']=binding;doc['children'].append({'engine':engine,'threadId':native_id,'model':model})
                     self.owners[native_id]=(ident,engine);doc['handoffClipped']=clipped;self._save(doc)
             else:
+                # Freeze the previous model's cumulative baseline before changing a reused CLI.
+                if binding.get('model') and binding.get('model')!=model:
+                    try:
+                        value=self.native_usage({'engine':engine,'threadId':binding['threadId']})
+                        with self.lock:self.record_usage(doc,engine,binding['threadId'],value,model=binding['model'])
+                    except Exception:pass
                 args={'engine':engine,'threadId':binding['threadId'],'cwd':doc['cwd']}
                 if binding.get('instructions'):args['developerInstructions']=binding['instructions']
                 self.call('thread/resume',args)
             self.call('native/permissions/set',{'engine':engine,'threadId':binding['threadId'],'mode':mode})
             with self.lock:
                 doc['model']=model;doc['models'][engine]=model
+                doc['binding']['model']=model
+                for child in doc['children']:
+                    if child['threadId']==binding['threadId']:child['model']=model
                 if not doc['preview']:
                     doc['preview']=next((part.get('text','')[:100] for part in params.get('input',[]) if part.get('type')=='text'),'附件消息')
                 self._save(doc)
@@ -330,6 +390,8 @@ class SharedConversations:
                 if not any(item.get('type')=='userMessage' for item in turn.setdefault('items',[])):
                     turn['items'].insert(0,{'id':params.get('clientUserMessageId') or 'aixs-user-'+str(uuid.uuid4()),
                         'type':'userMessage','content':copy.deepcopy(params.get('input',[])),'aixsInput':True})
+                turn['executionRequest']={'engine':engine,'model':model,**({'effort':params['effort']} if 'effort' in params else {})}
+                if params.get('continuationOf'):turn['continuationOf']=params['continuationOf']
                 self._save(doc);turn=copy.deepcopy(turn)
                 return dict(result,turn=turn,handoffClipped=bool(doc.get('handoffClipped')))
         finally:
@@ -341,6 +403,20 @@ class SharedConversations:
 
     def _canonical_turn(self, turn, engine, native_id):
         value=copy.deepcopy(turn);value['id']=self._turn_id(engine,native_id,value['id']);value['engine']=engine
+        # Native CLI versions may send null timestamps in terminal snapshots.
+        # They must not erase the times measured when live events arrived.
+        for key in ('startedAt','completedAt'):
+            stamp=timestamp_seconds(value.get(key))
+            if stamp is None:value.pop(key,None)
+            else:value[key]=stamp
+        duration=value.get('durationMs')
+        if not isinstance(duration,(int,float)) or isinstance(duration,bool) or not math.isfinite(duration) or duration<0:value.pop('durationMs',None)
+        owner=self.owners.get(native_id)
+        if owner and not value.get('model'):
+            doc=self._load(owner[0]);binding=doc.get('binding') or {}
+            existing=next((t for t in doc['turns'] if t['id']==value['id']),{})
+            if existing.get('model'):value['model']=existing['model']
+            elif binding.get('threadId')==native_id:value['model']=binding.get('model') or doc.get('model') or None
         return value
 
     @staticmethod
@@ -350,7 +426,7 @@ class SharedConversations:
         if method=='turn/started':return params['turn'].get('progress') or {'phase':'waiting','detail':'','updatedAt':time.time()}
         if method in ('item/started','item/completed'):
             item=params.get('item',{});kind=item.get('type')
-            if kind=='reasoning':phase='thinking'
+            if kind=='reasoning':phase='thinking' if method=='item/started' else 'waiting'
             elif kind=='agentMessage':phase='responding'
             elif kind in ('commandExecution','dynamicToolCall','mcpToolCall','fileChange','webSearch'):
                 phase='tool' if item.get('status','inProgress')=='inProgress' else 'waiting'
@@ -359,6 +435,17 @@ class SharedConversations:
         elif method=='item/agentMessage/delta':phase='responding'
         elif method in ('item/commandExecution/outputDelta','item/fileChange/outputDelta'):phase='tool'
         elif method=='item/mcpToolCall/progress':phase='tool';detail=str(params.get('message',''))[:240]
+        elif method in ('item/plan/delta','turn/plan/updated'):phase='planning'
+        elif method in ('item/fileChange/patchUpdated','turn/diff/updated'):phase='tool';detail='更新文件修改'
+        elif method=='item/commandExecution/terminalInteraction':phase='tool';detail='终端交互'
+        elif method=='hook/started':phase='tool';detail='执行 Hook'
+        elif method=='item/autoApprovalReview/started':phase='approval'
+        elif method=='autoApprovalReview/strictReviewRequired':phase='approval'
+        elif method=='thread/compacted':phase='waiting';detail='上下文整理完成'
+        elif method=='thread/status/changed':
+            flags=(params.get('status') or {}).get('activeFlags',[])
+            if 'waitingOnApproval' in flags:phase='approval'
+            elif 'waitingOnUserInput' in flags:phase='input'
         elif method=='error' and params.get('willRetry'):phase='retrying'
         return {'phase':phase,'detail':detail,'updatedAt':time.time()} if phase else None
 
@@ -367,7 +454,7 @@ class SharedConversations:
         if not owner:return event
         ident,engine=owner;native_id=params['threadId']
         with self.lock:
-            if self.index.get(ident,{}).get('deleted'):return event
+            if self.index.get(ident,{}).get('deleted') or ident in self.deleting:return event
             event=copy.deepcopy(event);params=event['params'];params['threadId']=ident
             if params.get('turnId'):params['turnId']=self._turn_id(engine,native_id,params['turnId'])
             if params.get('turn'):params['turn']=self._canonical_turn(params['turn'],engine,native_id)
@@ -384,37 +471,40 @@ class SharedConversations:
                         if item.get('type')=='userMessage':items=[i for i in items if not i.get('aixsInput')]
                         index=next((i for i,old in enumerate(items) if old['id']==item['id']),None)
                         if index is None:items.append(copy.deepcopy(item))
-                        else:items[index]=copy.deepcopy(item)
+                        else:apply_live_event({'items':items},'item/started',{'item':item})
                     turn.update(copy.deepcopy(incoming));turn['items']=items
+                if method=='turn/completed':settle_live_items(turn,turn.get('status','completed'))
                 if method=='turn/completed' and (doc.get('binding') or {}).get('threadId')==native_id:
                     doc['binding']['through']=len(doc['turns'])
-                if method=='turn/started':turn.setdefault('startedAt',time.time())
+                if method=='turn/started':
+                    if not isinstance(turn.get('startedAt'),(int,float)):turn['startedAt']=time.time()
                 else:
-                    turn.setdefault('completedAt',time.time())
-                    if turn.get('startedAt'):turn['durationMs']=max(0,int((turn['completedAt']-turn['startedAt'])*1000))
+                    if not isinstance(turn.get('completedAt'),(int,float)):turn['completedAt']=time.time()
+                    if not turn.get('durationMs') and isinstance(turn.get('startedAt'),(int,float)):
+                        turn['durationMs']=max(0,round((turn['completedAt']-turn['startedAt'])*1000))
+                self.record_usage(doc,engine,native_id,{},model=turn.get('model'),metadata={
+                    'mode':'independent','status':turn.get('status'),'startedAt':turn.get('startedAt'),'finishedAt':turn.get('completedAt')})
             elif method=='thread/tokenUsage/updated':
-                self.record_usage(doc,engine,native_id,{'tokenUsage':params.get('tokenUsage'),'recordedAt':time.time()})
+                self.record_usage(doc,engine,native_id,{'tokenUsage':params.get('tokenUsage'),'model':params.get('model'),'recordedAt':time.time(),
+                    'totalsPartial':bool(params.get('totalsPartial')),'contextStale':bool(params.get('contextStale'))})
                 params['conversationUsage']=self.usage_view(doc)
-            elif params.get('turnId'):
-                turn=next((t for t in doc['turns'] if t['id']==params['turnId']),None)
+            elif method=='native/childTurn':
+                turn=next((t for t in doc['turns'] if t['id']==params.get('turnId')),None)
+                if turn:
+                    turn.setdefault('nativeChildren',{})[params.get('sourceThreadId','')+':'+str(params.get('sourceTurnId',''))]={
+                        'sourceThreadId':params.get('sourceThreadId'),'sourceTurnId':params.get('sourceTurnId'),'engine':params.get('sourceEngine',engine),'model':params.get('sourceModel'),
+                        'turn':copy.deepcopy(params.get('childTurn') or {}),'stats':copy.deepcopy(params.get('stats') or {})}
+            elif params.get('turnId') or method in ('hook/started','hook/completed','thread/status/changed','thread/compacted',
+                    'warning','guardianWarning','deprecationNotice','configWarning','modelProvider/authRecoveryStarted','modelProvider/authRecoveryCompleted',
+                    'model/verification','model/safetyBuffering/updated','autoApprovalReview/strictReviewRequired','mcpServer/startupStatus/updated'):
+                turn=next((t for t in doc['turns'] if t['id']==params.get('turnId')),None) if params.get('turnId') else next((t for t in reversed(doc['turns']) if t.get('status')=='inProgress'),None)
                 if turn:
                     items=turn.setdefault('items',[])
                     if method in ('item/started','item/completed'):
-                        incoming=params['item'];item=next((i for i in items if i['id']==incoming['id']),None)
-                        if incoming.get('type')=='userMessage':
+                        if params['item'].get('type')=='userMessage':
                             items[:]=[i for i in items if not i.get('aixsInput')]
-                        if item is None:items.append(copy.deepcopy(incoming))
-                        else:item.update(copy.deepcopy(incoming))
-                    elif method=='item/agentMessage/delta':
-                        item=next((i for i in items if i['id']==params.get('itemId')),None)
-                        if item is None:item={'id':params['itemId'],'type':'agentMessage','text':''};items.append(item)
-                        item['text']=item.get('text','')+params.get('delta','')
-                    elif method in ('item/commandExecution/outputDelta','item/fileChange/outputDelta'):
-                        item=next((i for i in items if i['id']==params.get('itemId')),None)
-                        if item:item['aggregatedOutput']=item.get('aggregatedOutput','')+params.get('delta','')
-                    elif method=='item/mcpToolCall/progress':
-                        item=next((i for i in items if i['id']==params.get('itemId')),None)
-                        if item:item['progressMessage']=params.get('message','')
+                        apply_live_event(turn,method,params)
+                    else:apply_live_event(turn,method,params)
             changed=False
             if turn and progress:
                 prior=turn.get('progress',{})
@@ -422,6 +512,9 @@ class SharedConversations:
                 turn['progress']=copy.deepcopy(progress)
                 if changed:
                     activity=turn.setdefault('activity',[]);activity.append(copy.deepcopy(progress));del activity[:-30]
-            if changed or method in ('turn/started','turn/completed','item/completed','thread/tokenUsage/updated'):
-                doc['updatedAt']=time.time();self._save(doc)
+            checkpoint=turn and time.monotonic()-self.live_saves.get(ident,0)>=.25
+            if changed or checkpoint or method in ('turn/started','turn/completed','item/completed','native/childTurn','thread/tokenUsage/updated','error'):
+                doc['updatedAt']=time.time();self._save(doc);self.live_saves[ident]=time.monotonic()
+                if len(self.live_saves)>64:self.live_saves.pop(next(iter(self.live_saves)))
+            if turn and method in ('turn/started','turn/completed'):params['turn']=copy.deepcopy(turn)
             return event

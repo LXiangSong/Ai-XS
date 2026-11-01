@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from provider_manager import private_write
 
 
@@ -53,13 +54,14 @@ class WorkerPool:
         secrets=[v for v in [selected.get('key',''),*selected.get('headers',{}).values()] if v]
         for server in servers.values():secrets.extend(v for v in server.get('headers',{}).values() if v)
         private_write(folder/'spec.json',{'config':config,'cwd':cwd,'prompt':prompt,
-            'plugins':plugins,'instructions':instructions+'\n只在本次隔离工作区内工作，不修改原项目或其他执行目录。需要用户决定时使用提问工具。'})
+            'timeout':resources.get('timeout',3600),
+            'attachments':resources.get('attachments',[]),'plugins':plugins,'instructions':instructions+'\n只在本次隔离工作区内工作，不修改原项目或其他执行目录。需要用户决定时使用提问工具。'})
         env={**os.environ,'AI_XS_STATE_DIR':str(folder)}
         with self.lock:
             if self.closed:raise InterruptedError('共享服务正在关闭，未启动执行实例')
             process=subprocess.Popen([sys.executable,'-u',str(Path(__file__).with_name('collaboration_worker.py')),str(folder)],
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8',env=env,start_new_session=True,bufsize=1)
-            lock=threading.Lock();entry={'process':process,'lock':lock,'config':config,'folder':str(folder),'children':[],'stopping':False}
+            lock=threading.Lock();entry={'process':process,'lock':lock,'config':config,'folder':str(folder),'children':[],'stopping':False,'controls':{}}
             self.live[attempt]=entry
         def redact(value):
             if isinstance(value,str):
@@ -75,7 +77,7 @@ class WorkerPool:
                     if log.tell()>1024*1024:log.seek(0);log.truncate()
                     log.write(line[-6000:]);log.flush()
         threading.Thread(target=stderr,daemon=True).start()
-        result=None
+        result=None;sequence=0
         try:
             registered(config,{'pid':process.pid,'identity':process_identity(process.pid),'folder':str(folder)})
             with (folder/'events.jsonl').open('a') as log:
@@ -84,10 +86,16 @@ class WorkerPool:
                     except ValueError:continue
                     if log.tell()>1024*1024:log.seek(0);log.truncate()
                     log.write(json.dumps(message,ensure_ascii=False)+'\n');log.flush()
+                    if 'controlResult' in message:
+                        response=message['controlResult']
+                        with self.lock:pending=entry['controls'].get(response.get('requestId'))
+                        if pending:pending['response']=response;pending['done'].set()
                     if 'event' in message:
-                        event=message['event'];event.update(resources['context']);event.update(workerId=attempt,attemptId=attempt)
+                        sequence+=1
+                        event=message['event'];event.update(resources['context']);event.update(workerId=attempt,attemptId=attempt,receivedAt=time.time())
+                        event['attemptSequence']=sequence
                         if event.get('type')=='approval':event['nativeId']=str(event['id']);event['id']=attempt+':'+str(event['id'])
-                        self.emit(event);callback('event',event)
+                        callback('event',event);self.emit(event)
                     if 'children' in message:
                         entry['children']=message['children'];callback('identity',{'children':message['children']})
                     if 'finished' in message:result=message['finished']
@@ -114,7 +122,10 @@ class WorkerPool:
             for pipe in (process.stdin,process.stdout,process.stderr):
                 try:pipe.close()
                 except (OSError,ValueError):pass
-            with self.lock:self.live.pop(attempt,None)
+            with self.lock:
+                self.live.pop(attempt,None)
+                for pending in entry['controls'].values():
+                    pending.setdefault('response',{'ok':False,'unknown':True,'error':'成员已退出，无法确认引入结果'});pending['done'].set()
             if not certain:result={'status':'needs_reconciliation','error':'子进程曾需要强制结束，请检查操作与文件状态后继续','partial':result}
         return result
 
@@ -124,6 +135,23 @@ class WorkerPool:
         if method=='stop':entry['stopping']=True
         with entry['lock']:
             entry['process'].stdin.write(json.dumps({'method':method,'params':params or {}})+'\n');entry['process'].stdin.flush()
+
+    def steer(self, attempt, params, timeout=15):
+        request=uuid.uuid4().hex;pending={'done':threading.Event()}
+        with self.lock:
+            entry=self.live.get(attempt)
+            if not entry or entry['stopping']:raise ValueError('成员已结束或正在停止，消息未引入')
+            entry['controls'][request]=pending
+        try:
+            with entry['lock']:
+                entry['process'].stdin.write(json.dumps({'method':'turn/steer','params':params,'requestId':request})+'\n');entry['process'].stdin.flush()
+            if not pending['done'].wait(timeout):raise TimeoutError('引入回执超时，结果未知；请核对成员记录，不能自动重发')
+            result=pending['response']
+            if result.get('unknown'):raise TimeoutError(result.get('error') or '引入结果未知，请先核对')
+            if not result.get('ok'):raise ValueError(result.get('error') or '成员未确认引入')
+            return result.get('result',{})
+        finally:
+            with self.lock:entry['controls'].pop(request,None)
 
     def close(self):
         with self.lock:self.closed=True;attempts=list(self.live)

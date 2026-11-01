@@ -92,6 +92,20 @@ class NativeSessionTests(unittest.TestCase):
         listing=bridge.call('thread/list',{'nativeDiscovery':'background'})['data']
         self.assertTrue(any(row.get('nativeOnly') for row in listing))
 
+    def test_import_keeps_exact_old_models_and_deduplicates_message_usage(self):
+        path=next((self.home/'.claude'/'projects').glob('*/*.jsonl'))
+        rows=[json.loads(line) for line in path.read_text().splitlines()]
+        updated=json.loads(json.dumps(rows[-1]));updated['message']['usage']['output_tokens']=4
+        newer=json.loads(json.dumps(rows[-1]));newer['uuid']='a2';newer['message'].update(id='m2',model='gateway/new-model')
+        path.write_text('\n'.join(json.dumps(row) for row in rows+[updated,rows[0],newer]))
+        bridge=self.bridge();native=next(item for item in bridge.call('thread/list',{})['data'] if item.get('nativeOnly'))
+        bridge.call('thread/read',{'threadId':native['id']})
+        usage=bridge.call('usage/read',{'threadId':native['id']})['tokenUsage']
+        models={m['model']:m for m in usage['byModel']}
+        self.assertEqual(models['test-model']['total']['totalTokens'],19)
+        self.assertEqual(models['gateway/new-model']['total']['totalTokens'],17)
+        self.assertEqual(usage['total']['totalTokens'],36)
+
 
 if __name__ == '__main__':
     unittest.main()

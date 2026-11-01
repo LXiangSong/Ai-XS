@@ -4,10 +4,14 @@
 package app.aixs.mobile;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Bundle;
@@ -17,20 +21,30 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.text.Editable;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.view.KeyEvent;
+import android.view.Window;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.util.LruCache;
 import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -66,6 +80,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -82,6 +97,9 @@ extends AppCompatActivity
 implements NativeEngine.Observer {
     private static final String[] ENGINE_IDS = new String[]{"codex", "claude", "deepseek"};
     private String engine = "codex";
+    private ConversationCollaboration collaboration;
+    private TextView modeLabel;
+    private final HashMap<String,JSONObject> collaborationApprovals = new HashMap<>();
     private String model = "";
     private String effort = "high";
     private String cwd = "";
@@ -105,9 +123,15 @@ implements NativeEngine.Observer {
     private LinearLayout statsPopup;
     private boolean taskProgressPopup;
     private LinearLayout askHost;
+    private ScrollView askOverlay;
     private TextView topTitle;
     private TextView topSubtitle;
     private TextView engineLabel;
+    private LinearLayout insightButton;
+    private TextView insightBadge;
+    private SessionInsightPanel insightPanel;
+    private SessionInsight currentInsight;
+    private String insightChipState;
     private TextView statusText;
     private TextView attachBadge;
     private TextView modelLabel;
@@ -120,7 +144,7 @@ implements NativeEngine.Observer {
     private LinearLayout enginePill;
     private LinearLayout projectPill;
     private LinearLayout sendButton;
-    private LinearLayout stopButton;
+    private ConversationQueue messageQueue;
     private LinearLayout attachButton;
     private LinearLayout drawerActive;
     private EditText composer;
@@ -130,6 +154,7 @@ implements NativeEngine.Observer {
     private final HashMap<String, JSONObject> modelMeta = new HashMap<>();
     private final ArrayList<String> modelLabels = new ArrayList();
     private final HashSet<String> expandedActivities = new HashSet();
+    private final java.util.Set<String> autoExpandedActivities = new java.util.HashSet<>();
     private boolean followLatest = true;
     private boolean loading;
     private int engineGeneration;
@@ -137,10 +162,20 @@ implements NativeEngine.Observer {
     private String pendingThread = "";
     private String failedThread = "";
     private int historyGeneration;
+    private final HashMap<String,JSONObject> collaborationHistory = new HashMap<>();
+    private boolean loadingCollaborationHistory;
+    private int historyAnchorScroll = -1;
+    private int historyAnchorHeight;
     private boolean submitting;
     private boolean resumed;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ArrayList<JSONObject> attachments = new ArrayList();
+    private LinearLayout attachStrip;
+    private HorizontalScrollView attachScroll;
+    private LinearLayout quoteBar;
+    private JSONObject quote;
+    private final LruCache<String, Bitmap> thumbCache = new LruCache<>(24);
+    private RuntimeManager thumbRuntime;
     private final HashSet<String> approvals = new HashSet();
     private String drawerTab = "threads";
     private String filterCwd = "";
@@ -165,7 +200,8 @@ implements NativeEngine.Observer {
             }
         }
     };
-    private final Runnable repaint = () -> this.renderMessages(false);
+    private final CoalescedUpdate repaint = new CoalescedUpdate(() -> this.renderMessages(false),
+        task -> this.handler.postDelayed(task, 80L), task -> this.handler.removeCallbacks(task));
     private final OnBackPressedCallback backCallback = new OnBackPressedCallback(false){
 
         public void handleOnBackPressed() {
@@ -182,6 +218,7 @@ implements NativeEngine.Observer {
     private boolean emptyRendered;
     private final ArrayList<LinearLayout> turnHosts = new ArrayList();
     private final ArrayList<String> turnSigs = new ArrayList();
+    private final ArrayList<Boolean> turnRunning = new ArrayList();
     private ConversationRenderer renderer;
     private String rendererEngine = "";
     private String renderingEngine = "";
@@ -201,6 +238,28 @@ implements NativeEngine.Observer {
         if (requestedConversation != null && !requestedConversation.isEmpty()) this.threadId = requestedConversation;
         this.model = prefs.getString("model-" + this.engine, "");
         this.effort = prefs.getString("effort", "high");
+        this.collaboration = new ConversationCollaboration(this, new ConversationCollaboration.Host(){
+            public JSONObject thread(){return NativeHomeActivity.this.thread;}
+            public String engine(){return NativeHomeActivity.this.engine;}
+            public String model(){return NativeHomeActivity.this.model;}
+            public String effort(){return NativeHomeActivity.this.effort;}
+            public String permission(){return NativeHomeActivity.this.permissionMode;}
+            public void apply(JSONObject value){NativeHomeActivity.this.applyThreadView(value);}
+            public void controls(){NativeHomeActivity.this.updateCollaborationChrome();NativeHomeActivity.this.updateControls();}
+            public void approval(JSONObject request){NativeHomeActivity.this.showApproval(request);}
+            public void approvals(java.util.Set<String> valid){
+                for(String id:new ArrayList<>(collaborationApprovals.keySet()))if(!valid.contains(id)){
+                    collaborationApprovals.remove(id);approvals.remove(id);removeAsk(id);
+                    for(int i=askHost.getChildCount()-1;i>=0;i--){Object tag=askHost.getChildAt(i).getTag();if(tag instanceof String&&((String)tag).startsWith(id+"-question-"))askHost.removeViewAt(i);}
+                }
+            }
+        });
+        this.messageQueue=new ConversationQueue(this,new ConversationQueue.Host(){
+            public JSONObject thread(){return NativeHomeActivity.this.thread;}
+            public void queue(JSONObject value){NativeHomeActivity.this.applyQueueView(value);}
+            public boolean composerEmpty(){return !NativeHomeActivity.this.submitting && !NativeHomeActivity.this.composerContent();}
+            public void restore(JSONArray input){NativeHomeActivity.this.restoreQueuedInput(input);}
+        });
         this.build();
         this.drawer.addDrawerListener((DrawerLayout.DrawerListener)new DrawerLayout.SimpleDrawerListener(){
 
@@ -268,7 +327,8 @@ implements NativeEngine.Observer {
         this.scrollBottom.setBackgroundResource(R.drawable.bg_scroll_button);
         ImageView arrow = new ImageView((Context)this);
         arrow.setImageResource(R.drawable.ic_arrow_down);
-        arrow.setColorFilter(Ui.muted);
+        arrow.setColorFilter(Ui.text);
+        this.scrollBottom.setElevation(Ui.dp((Context)this, 6));
         this.scrollBottom.addView((View)arrow, Ui.w(Ui.dp((Context)this, 18), Ui.dp((Context)this, 18)));
         Ui.touchable(this.scrollBottom);
         this.scrollBottom.setOnClickListener(v -> {
@@ -276,6 +336,7 @@ implements NativeEngine.Observer {
             this.hintScrollButton();
             this.chat.smoothScrollTo(0, Math.max(0, this.messages.getHeight() - this.chat.getHeight() + this.chat.getPaddingBottom()));
         });
+        this.placeScrollButton();
         this.renderMessages(false);
     }
 
@@ -303,12 +364,224 @@ implements NativeEngine.Observer {
         this.topbar.addView((View)this.enginePill, pillSpace);
         this.engineLabel = (TextView)this.enginePill.getChildAt(this.enginePill.getChildCount() - 1);
         TextView collaborationMode = Ui.text(this, "独立 ▾", 11.5f, Ui.muted, null);
+        this.modeLabel=collaborationMode;
         collaborationMode.setPadding(Ui.dp(this, 7), Ui.dp(this, 8), Ui.dp(this, 7), Ui.dp(this, 8));
         Ui.touchable(collaborationMode);
         collaborationMode.setContentDescription("切换独立或协作模式");
         collaborationMode.setOnClickListener(v -> this.openCollaboration());
         this.topbar.addView(collaborationMode);
-        this.topbar.addView(Ui.iconButton((Context)this, R.drawable.ic_add, "\u65b0\u5efa\u4f1a\u8bdd", this::newThread));
+        this.topbar.addView(this.insightEntry());
+    }
+
+    /**
+     * 右上角入口：从“新建会话”改成会话详情。新建会话仍保留在抽屉顶部的主按钮，
+     * 这里用图标加角标显示本会话的文件与子代理数量，执行中时高亮。
+     */
+    private View insightEntry() {
+        FrameLayout box = new FrameLayout((Context)this);
+        LinearLayout button = Ui.iconButton((Context)this, R.drawable.ic_insight, "\u4f1a\u8bdd\u8be6\u60c5", this::openInsight);
+        box.addView((View)button, new FrameLayout.LayoutParams(Ui.dp((Context)this, 48), Ui.dp((Context)this, 48)));
+        this.insightButton = button;
+        this.insightBadge = Ui.text((Context)this, "", 9.5f, Ui.onAccentSoft, Ui.medium((Context)this));
+        this.insightBadge.setGravity(17);
+        this.insightBadge.setPadding(Ui.dp((Context)this, 4), 0, Ui.dp((Context)this, 4), 0);
+        this.insightBadge.setMinWidth(Ui.dp((Context)this, 16));
+        this.insightBadge.setMinHeight(Ui.dp((Context)this, 16));
+        this.insightBadge.setBackground(Ui.round(Ui.accentSoft, Ui.dp((Context)this, 999)));
+        this.insightBadge.setVisibility(View.GONE);
+        this.insightBadge.setClickable(false);
+        this.insightBadge.setFocusable(false);
+        FrameLayout.LayoutParams badgeSpace = new FrameLayout.LayoutParams(-2, Ui.dp((Context)this, 16), Gravity.TOP | Gravity.END);
+        badgeSpace.topMargin = Ui.dp((Context)this, 4);
+        box.addView((View)this.insightBadge, badgeSpace);
+        box.setLayoutParams(new LinearLayout.LayoutParams(Ui.dp((Context)this, 48), Ui.dp((Context)this, 48)));
+        this.insightChipState = null;
+        this.updateInsightEntry();
+        return box;
+    }
+
+    private void updateInsightEntry() {
+        if (this.insightButton == null || this.insightBadge == null) return;
+        SessionInsight insight = this.currentInsight != null ? this.currentInsight : SessionInsight.of(this.thread);
+        int count = insight.files.size() + insight.subagents.size();
+        boolean running = !this.turnId.isEmpty() || insight.activeSubagents > 0;
+        View icon = this.insightButton.getChildCount() > 0 ? this.insightButton.getChildAt(0) : null;
+        if (icon instanceof ImageView) ((ImageView)icon).setColorFilter(running ? Ui.accent : Ui.muted);
+        this.insightBadge.setVisibility(count > 0 || running ? View.VISIBLE : View.GONE);
+        this.insightBadge.setText(count > 99 ? "99+" : count > 0 ? String.valueOf(count) : "\u2022");
+        this.insightBadge.setTextColor(running ? Ui.onAccent : Ui.onAccentSoft);
+        this.insightBadge.setBackground(Ui.round(running ? Ui.accent : Ui.accentSoft, Ui.dp((Context)this, 999)));
+        String state = count + "/" + running + "/" + insight.files.size() + "/" + insight.subagents.size() + "/" + insight.sources.size();
+        if (state.equals(this.insightChipState)) return;
+        this.insightChipState = state;
+        StringBuilder description = new StringBuilder("\u4f1a\u8bdd\u8be6\u60c5");
+        if (insight.files.size() > 0) description.append("\uff0c").append(insight.files.size()).append(" \u4e2a\u6587\u4ef6\u53d8\u5316");
+        if (insight.subagents.size() > 0) description.append("\uff0c").append(insight.subagents.size()).append(" \u4e2a\u5b50\u4ee3\u7406");
+        if (insight.sources.size() > 0) description.append("\uff0c").append(insight.sources.size()).append(" \u9879\u6765\u6e90");
+        if (running) description.append("\uff0c\u6b63\u5728\u8fd0\u884c");
+        this.insightButton.setContentDescription(description.toString());
+    }
+
+    private void openInsight() {
+        if (!NativeEngine.ready()) {
+            this.startService();
+            return;
+        }
+        if (this.thread == null || this.threadId.isEmpty()) {
+            if (!this.pendingThread.isEmpty()) NativeUi.toast((Activity)this, "\u6b63\u5728\u8bfb\u53d6\u4f1a\u8bdd\uff0c\u8bf7\u7a0d\u5019");
+            else NativeUi.toast((Activity)this, "\u53d1\u9001\u7b2c\u4e00\u8f6e\u4efb\u52a1\u540e\uff0c\u8fd9\u91cc\u4f1a\u6c47\u603b\u6587\u4ef6\u3001\u5b50\u4ee3\u7406\u548c\u6765\u6e90");
+            return;
+        }
+        this.sheet(sheet -> {
+            SessionInsightPanel panel = new SessionInsightPanel(this, new SessionInsightPanel.Host() {
+                @Override public void dismiss() { if (currentSheet != null) currentSheet.dismiss(); }
+                @Override public void openEditor(String path) { NativeHomeActivity.this.openEditor(path); }
+                @Override public void revealTurn(int turnNumber) { NativeHomeActivity.this.revealTurn(turnNumber); }
+            });
+            this.insightPanel = panel;
+            panel.update(this.thread);
+            this.content.addView(panel.build(), new LinearLayout.LayoutParams(-1, 0, 1.0f));
+            sheet.setOnDismissListener(d -> {
+                panel.release();
+                if (this.insightPanel == panel) this.insightPanel = null;
+            });
+        }, 0.9);
+    }
+
+    /** 从详情面板回到原对话：展开该轮的“本轮文件”卡并滚到轮次开头。 */
+    private void revealTurn(int turnNumber) {
+        JSONArray turns = this.thread == null ? null : this.thread.optJSONArray("turns");
+        JSONObject turn = turns == null ? null : turns.optJSONObject(turnNumber - 1);
+        if (turn == null) return;
+        this.sheetDismiss();
+        if (this.currentSheet != null) {
+            this.currentSheet.dismiss();
+            this.currentSheet = null;
+        }
+        String turnId = turn.optString("id");
+        JSONArray items = turn.optJSONArray("items");
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item != null && "fileReport".equals(item.optString("type"))) {
+                this.expandedActivities.add(turnId + ":" + item.optString("id"));
+                break;
+            }
+        }
+        this.followLatest = false;
+        this.renderMessages(false);
+        final int index = turnNumber - 1;
+        this.chat.post(() -> {
+            if (index < this.turnHosts.size()) {
+                View host = this.turnHosts.get(index);
+                this.chat.smoothScrollTo(0, Math.max(0, host.getTop() + this.messages.getTop() - Ui.dp((Context)this, 8)));
+                this.hintScrollButton();
+            }
+        });
+    }
+
+    /** Claude-style diff review: one file block at a time, bounded and readable on a phone. */
+    void showDiffs(JSONObject report) {
+        if (report == null) return;
+        String root = report.optString("root", "");
+        JSONArray changes = report.optJSONArray("changes");
+        LinearLayout body = Ui.col((Context)this);
+        body.setPadding(Ui.dp(this, 18), Ui.dp(this, 8), Ui.dp(this, 18), Ui.dp(this, 8));
+        boolean any = false;
+        for (int i = 0; changes != null && i < changes.length(); i++) {
+            JSONObject change = changes.optJSONObject(i);
+            if (change == null) continue;
+            String diff = change.optString("diff", "");
+            if (diff.isEmpty()) continue;
+            any = true;
+            String path = change.optString("path", "");
+            if (!root.isEmpty() && path.startsWith(root + "/")) path = path.substring(root.length() + 1);
+            LinearLayout head = Ui.row((Context)this);
+            head.setGravity(16);
+            LinearLayout.LayoutParams headSpace = new LinearLayout.LayoutParams(-1, -2);
+            headSpace.topMargin = Ui.dp(this, i == 0 ? 2 : 14);
+            headSpace.bottomMargin = Ui.dp(this, 3);
+            body.addView(head, headSpace);
+            String kind = change.optString("kind", "modified");
+            String tag = kind.equals("created") ? "新" : kind.equals("deleted") ? "删" : "改";
+            int tagColor = kind.equals("created") ? Ui.mint : kind.equals("deleted") ? Ui.danger : Ui.accent;
+            TextView badge = Ui.text((Context)this, tag, 10.0f, tagColor, Ui.medium(this));
+            badge.setGravity(17);
+            badge.setBackground(Ui.round(Ui.alpha(tagColor, 0.12f), Ui.dp(this, 7)));
+            LinearLayout.LayoutParams badgeSpace = new LinearLayout.LayoutParams(Ui.dp(this, 21), Ui.dp(this, 19));
+            badgeSpace.rightMargin = Ui.dp(this, 7);
+            head.addView(badge, badgeSpace);
+            TextView name = Ui.text((Context)this, path, 12.5f, Ui.text, Ui.medium((Context)this));
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            head.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+            int added = change.optInt("added", -1), removed = change.optInt("removed", -1);
+            String statText = ConversationRenderer.diffStat(added, removed);
+            if (!statText.isEmpty()) {
+                TextView stat = Ui.text((Context)this, statText, 10.5f, Ui.faint, Ui.mono(this));
+                LinearLayout.LayoutParams statSpace = new LinearLayout.LayoutParams(-2, -2);
+                statSpace.leftMargin = Ui.dp(this, 8);
+                head.addView(stat, statSpace);
+            }
+            TextView code = new TextView((Context)this);
+            code.setTextSize(10.5f);
+            code.setTypeface(Ui.mono(this));
+            code.setIncludeFontPadding(false);
+            code.setLineSpacing(Ui.dp(this, 1), 1f);
+            code.setTextIsSelectable(true);
+            code.setTextColor(Ui.muted);
+            code.setPadding(Ui.dp(this, 7), Ui.dp(this, 4), Ui.dp(this, 7), Ui.dp(this, 4));
+            code.setBackground(Ui.round(this, Ui.cardHigh, 8.0f, 0.8f, Ui.lineSoft));
+            code.setText(diffSpans(diff));
+            body.addView(code, Ui.fill());
+        }
+        if (!any) {
+            TextView empty = Ui.text((Context)this, "这次没有可显示的文本差异（文件可能较大或不是文本）。", 12f, Ui.faint, null);
+            empty.setLineSpacing(Ui.dp(this, 3), 1f);
+            body.addView(empty);
+        }
+        CappedScrollView scroll = new CappedScrollView(this);
+        scroll.setMaxHeight((int) (getResources().getDisplayMetrics().heightPixels * 0.62f));
+        scroll.addView(body, new FrameLayout.LayoutParams(-1, -2));
+        new MaterialAlertDialogBuilder(this).setTitle("本轮文件改动").setView(scroll)
+                .setPositiveButton("关闭", null).show();
+    }
+
+    private CharSequence diffSpans(String diff) {
+        SpannableStringBuilder out = new SpannableStringBuilder();
+        String[] lines = diff.split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            int start = out.length();
+            out.append(line);
+            int end = out.length();
+            int color = 0, background = 0;
+            if (line.startsWith("+")) { color = Ui.mint; background = Ui.alpha(Ui.mint, 0.13f); }
+            else if (line.startsWith("-")) { color = Ui.danger; background = Ui.alpha(Ui.danger, 0.13f); }
+            else if (line.startsWith("@@")) { color = Ui.accent; }
+            if (color != 0) out.setSpan(new ForegroundColorSpan(color), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            if (background != 0) out.setSpan(new BackgroundColorSpan(background), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            if (i < lines.length - 1) out.append('\n');
+        }
+        return out;
+    }
+
+    void openEditor(String path) {
+        if (path == null || path.isEmpty()) return;
+        if (this.currentSheet != null) {
+            this.currentSheet.dismiss();
+            this.currentSheet = null;
+        }
+        int slash = path.lastIndexOf('/');
+        String folder = slash > 0 ? path.substring(0, slash) : this.cwd;
+        Intent intent = new Intent((Context)this, NativeWorkspaceActivity.class)
+            .putExtra("engine", this.engine == null || this.engine.isEmpty() ? "codex" : this.engine)
+            .putExtra("cwd", folder)
+            .putExtra("file", path);
+        try {
+            this.startActivity(intent);
+        } catch (Exception error) {
+            NativeUi.toast((Activity)this, "\u65e0\u6cd5\u6253\u5f00\u6587\u4ef6\uff1a" + error.getMessage());
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -333,17 +606,59 @@ implements NativeEngine.Observer {
                 }).setNegativeButton("取消等待", (d,w) -> this.collaborationAfterTurn=false).show();
             return;
         }
-        Runnable open = () -> startActivity(new Intent(this, CollaborationActivity.class)
-            .putExtra("conversationId", this.threadId).putExtra("cwd", this.cwd));
+        Runnable open = () -> this.collaboration.modes();
         if (this.threadId.isEmpty()) this.call("thread/start", NativeUi.json("cwd", this.cwd, "model", this.model), r -> {
-            this.thread=r.optJSONObject("thread");this.threadId=this.thread.optString("id");this.persist();open.run();
+            this.applyThreadView(r.optJSONObject("thread"));this.threadId=this.thread.optString("id");this.persist();open.run();
         }); else open.run();
+    }
+
+    private void updateCollaborationChrome(){
+        if(this.collaboration==null)return;
+        boolean enabled=this.collaboration.enabled();
+        if(this.modeLabel!=null)this.modeLabel.setText(enabled?"协作 ▾":"独立 ▾");
+        if(this.engineLabel!=null)this.engineLabel.setText(enabled?"成员 "+this.collaboration.members():NativeUi.engineName(this.engine));
+        if(this.modelLabel!=null)this.modelLabel.setText(enabled?"成员模型":shortModel(this.model));
+        if(this.effortLabel!=null)this.effortLabel.setText(enabled?"成员配置":this.effortName());
+        this.updatePermissionPill();this.updateSubtitle();
     }
 
     private int composerWidth() {
         /* 与消息正文的 18dp 左右边距对齐，不再额外收窄。 */
         int available = Math.max(0, this.getResources().getDisplayMetrics().widthPixels - Ui.dp((Context)this, 36));
         return Math.min(Ui.dp((Context)this, 640), available);
+    }
+
+    /** 提问浮层可用高度：对话区高度减去输入区（含键盘占位）与上下留白。 */
+    private int askOverlayMaxHeight() {
+        View frame = this.findViewById(R.id.chat_frame);
+        int frameHeight = frame == null ? 0 : frame.getHeight();
+        if (frameHeight <= 0) frameHeight = this.getResources().getDisplayMetrics().heightPixels;
+        int composer = this.composerHost == null ? 0 : this.composerHost.getHeight();
+        int room = frameHeight - composer - Ui.dp(this, 24);
+        return Math.max(Ui.dp(this, 140), room);
+    }
+
+    /** 内含独立滚动区的容器：只让选项滚，卡片头部与按钮行保持可见。 */
+    static final class CappedScrollView extends ScrollView {
+        private int maxHeight = Integer.MAX_VALUE;
+
+        CappedScrollView(Context context) {
+            super(context);
+            setVerticalScrollBarEnabled(false);
+        }
+
+        void setMaxHeight(int value) {
+            if (this.maxHeight == value) return;
+            this.maxHeight = value;
+            requestLayout();
+        }
+
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int capped = MeasureSpec.getMode(heightSpec) == MeasureSpec.UNSPECIFIED
+                    ? this.maxHeight
+                    : Math.min(MeasureSpec.getSize(heightSpec), this.maxHeight);
+            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(capped, MeasureSpec.AT_MOST));
+        }
     }
 
     private void buildComposer() {
@@ -361,16 +676,36 @@ implements NativeEngine.Observer {
                     setMeasuredDimension(View.MeasureSpec.getSize(width), 0);
                     return;
                 }
-                int maximum = Math.min(Ui.dp(NativeHomeActivity.this, 340), getResources().getDisplayMetrics().heightPixels / 3);
-                super.onMeasure(width, View.MeasureSpec.makeMeasureSpec(maximum, View.MeasureSpec.AT_MOST));
+                super.onMeasure(width, View.MeasureSpec.makeMeasureSpec(askOverlayMaxHeight(), View.MeasureSpec.AT_MOST));
             }
         };
         questions.setClipToPadding(false);
         questions.addView(this.askHost);
-        LinearLayout.LayoutParams questionSpace = new LinearLayout.LayoutParams(this.composerWidth() + Ui.dp(this, 16), -2);
-        questionSpace.gravity = Gravity.CENTER_HORIZONTAL;
-        this.composerHost.addView(questions, questionSpace);
+        if (this.askOverlay != null && this.askOverlay.getParent() instanceof ViewGroup) {
+            ((ViewGroup)this.askOverlay.getParent()).removeView(this.askOverlay);
+        }
+        this.askOverlay = questions;
+        FrameLayout frame = (FrameLayout)this.findViewById(R.id.chat_frame);
+        if (frame != null) {
+            /* 浮层盖在输入区上方：不参与输入区排版，也不再改动对话区 padding。 */
+            FrameLayout.LayoutParams askSpace = new FrameLayout.LayoutParams(this.composerWidth() + Ui.dp(this, 16), -2);
+            askSpace.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            askSpace.bottomMargin = this.composerHost.getHeight();
+            frame.addView((View)questions, askSpace);
+        } else {
+            LinearLayout.LayoutParams questionSpace = new LinearLayout.LayoutParams(this.composerWidth() + Ui.dp(this, 16), -2);
+            questionSpace.gravity = Gravity.CENTER_HORIZONTAL;
+            this.composerHost.addView(questions, questionSpace);
+        }
         this.composerHost.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> this.chat.post(() -> {
+            if (this.askOverlay != null && this.askOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams askSpace = (FrameLayout.LayoutParams)this.askOverlay.getLayoutParams();
+                if (askSpace.bottomMargin != v.getHeight()) {
+                    askSpace.bottomMargin = v.getHeight();
+                    this.askOverlay.setLayoutParams(askSpace);
+                }
+            }
+            this.placeScrollButton();
             int used = v.getHeight() + (this.statusStrip == null ? 0 : this.statusStrip.getHeight());
             if (this.chat.getPaddingBottom() != used) {
                 this.chat.setPadding(this.chat.getPaddingLeft(), this.chat.getPaddingTop(), this.chat.getPaddingRight(), used);
@@ -413,12 +748,15 @@ implements NativeEngine.Observer {
         capsuleSpace.bottomMargin = Ui.dp((Context)this, 8);
         this.composerHost.addView((View)this.taskCapsule, capsuleSpace);
 
-        LinearLayout above = Ui.row((Context)this);
+        LinearLayout above = Ui.col((Context)this);
         above.setGravity(16);
         Ui.pad(above, 0, 0, 0, 4);
         LinearLayout.LayoutParams aboveSpace = new LinearLayout.LayoutParams(composerWidth, -2);
         aboveSpace.gravity = 17;
         this.composerHost.addView((View)above, aboveSpace);
+        LinearLayout queuePanel=Ui.col(this);
+        above.addView(queuePanel,Ui.fill());
+        this.messageQueue.attach(queuePanel);
 
         /* 底部安全区：顶边与输入框上沿对齐，背景与页面同色，不出现分界。 */
         LinearLayout dock = Ui.col((Context)this);
@@ -444,11 +782,23 @@ implements NativeEngine.Observer {
         this.composer.setInputType(147457);
         this.composer.setPadding(Ui.dp((Context)this, 16), Ui.dp((Context)this, 14), Ui.dp((Context)this, 16), Ui.dp((Context)this, 8));
         this.composer.setBackgroundColor(0);
+        this.composer.addTextChangedListener(new TextWatcher(){
+            public void beforeTextChanged(CharSequence s,int start,int count,int after){}
+            public void onTextChanged(CharSequence s,int start,int before,int count){}
+            public void afterTextChanged(Editable text){NativeHomeActivity.this.updateExecutionButton();}
+        });
         LinearLayout shell = Ui.col((Context)this);
         shell.setBackground(Ui.round((Context)this, Ui.card, 22.0f, 1.0f, Ui.lineSoft));
         LinearLayout.LayoutParams shellSpace = new LinearLayout.LayoutParams(composerWidth, -2);
         shellSpace.gravity = 17;
         card.addView((View)shell, shellSpace);
+        this.quoteBar = Ui.col((Context)this);
+        this.quoteBar.setBackground(Ui.round(Ui.cardHigh, Ui.dp((Context)this, 12)));
+        this.quoteBar.setVisibility(View.GONE);
+        Ui.pad(this.quoteBar, 10, 8, 6, 8);
+        LinearLayout.LayoutParams quoteSpace = new LinearLayout.LayoutParams(-1, -2);
+        quoteSpace.setMargins(Ui.dp((Context)this, 10), Ui.dp((Context)this, 10), Ui.dp((Context)this, 10), 0);
+        shell.addView((View)this.quoteBar, quoteSpace);
         shell.addView((View)this.composer, Ui.fill());
         View inputDivider = new View((Context)this);
         inputDivider.setBackgroundColor(Ui.lineSoft);
@@ -475,6 +825,16 @@ implements NativeEngine.Observer {
         LinearLayout.LayoutParams permissionSpace = new LinearLayout.LayoutParams(-2, Ui.dp((Context)this, 30));
         chips.addView((View)permissionPill, permissionSpace);
         above.addView((View)chips, Ui.fill());
+        this.attachScroll = new HorizontalScrollView((Context)this);
+        this.attachScroll.setHorizontalScrollBarEnabled(false);
+        this.attachScroll.setClipToPadding(false);
+        this.attachScroll.setVisibility(View.GONE);
+        this.attachStrip = Ui.row((Context)this);
+        this.attachStrip.setGravity(16);
+        this.attachScroll.addView((View)this.attachStrip, new FrameLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams stripSpace = new LinearLayout.LayoutParams(-1, -2);
+        stripSpace.topMargin = Ui.dp((Context)this, 6);
+        above.addView((View)this.attachScroll, stripSpace);
         this.updateUsageRow();
         LinearLayout actions = Ui.row((Context)this);
         actions.setGravity(16);
@@ -590,11 +950,7 @@ implements NativeEngine.Observer {
         usageSpace.gravity = 17;
         usageSpace.setMargins(0, Ui.dp((Context)this, 8), 0, Ui.dp((Context)this, 8));
         dock.addView((View)this.usageRow, usageSpace);
-        this.stopButton = this.circle(R.drawable.ic_stop, Ui.cardHigh, Ui.text, "\u505c\u6b62\u4efb\u52a1", this::interrupt);
-        LinearLayout.LayoutParams stopSpace = new LinearLayout.LayoutParams(Ui.dp((Context)this, 38), Ui.dp((Context)this, 38));
-        stopSpace.setMarginStart(Ui.dp((Context)this, 8));
-        actions.addView((View)this.stopButton, stopSpace);
-        this.sendButton = this.circle(R.drawable.ic_send, Ui.accent, Ui.onAccent, "\u53d1\u9001\u4efb\u52a1", this::sendMessage);
+        this.sendButton = this.circle(R.drawable.ic_send, Ui.accent, Ui.onAccent, "执行任务", this::executionClick);
         LinearLayout.LayoutParams sendSpace = new LinearLayout.LayoutParams(Ui.dp((Context)this, 38), Ui.dp((Context)this, 38));
         sendSpace.setMarginStart(Ui.dp((Context)this, 8));
         actions.addView((View)this.sendButton, sendSpace);
@@ -1120,10 +1476,6 @@ implements NativeEngine.Observer {
         footer.setPadding(Ui.dp((Context)this, 12), Ui.dp((Context)this, 8), Ui.dp((Context)this, 12), Ui.dp((Context)this, 12));
         footer.addView(Ui.divider((Context)this, 12));
         Ui.gap(footer, 6);
-        footer.addView(this.drawerRow(R.drawable.ic_spark, "协作", false, () -> {
-            this.drawer.closeDrawers();
-            this.startActivity(new Intent(this, CollaborationActivity.class));
-        }, false));
         footer.addView(this.drawerRow(R.drawable.ic_tools, "工具与扩展", false, () -> {
             this.drawer.closeDrawers();
             this.startActivity(new Intent((Context)this, NativeToolsActivity.class).putExtra("engine", this.engine));
@@ -1386,11 +1738,15 @@ implements NativeEngine.Observer {
         this.failedThread = "";
         this.readPermissionMode();
         this.expandedActivities.clear();
+        this.autoExpandedActivities.clear();
         this.followLatest = true;
         this.thread = null;
+        this.updateCollaborationChrome();
         this.resumed = false;
         this.usage = null;
         this.attachments.clear();
+        this.quote = null;
+        this.refreshQuote();
         this.composer.setText("");
         this.persist();
         this.renderMessages(false);
@@ -1399,7 +1755,11 @@ implements NativeEngine.Observer {
     }
 
     private void applyThreadView(JSONObject value) {
+        try { value=CollaborationEvents.mergeSnapshot(this.thread,value); } catch(JSONException ignored) {}
+        if(this.collaboration!=null)this.collaboration.replay(value);
         this.thread = value;
+        if (value != null) mergeCachedCollaboration(value);
+        if(value!=null)this.threadId=value.optString("id",this.threadId);
         if (this.thread != null) {
             if (this.thread.optJSONObject("usage") != null) this.usage = this.thread.optJSONObject("usage");
             this.cwd = ConversationContent.string(this.thread, "cwd", this.cwd);
@@ -1416,14 +1776,39 @@ implements NativeEngine.Observer {
                 label.setText(NativeHomeActivity.folder(this.cwd));
             }
         }
-        this.renderMessages(true);
+        this.renderMessages(false);
+        this.updateCollaborationChrome();
         this.updateUsageRow();
+    }
+
+    /** Queue state changes must not re-layout the whole transcript or animate it. */
+    private void applyQueueView(JSONObject value) {
+        if (value == null || this.thread == null) return;
+        if (!this.threadId.equals(value.optString("id", this.threadId))) return;
+        String oldTurns = String.valueOf(this.thread.optJSONArray("turns"));
+        try {
+            ConversationSnapshots.applyQueue(this.thread, value);
+            if (this.collaboration != null) this.collaboration.replay(this.thread);
+            mergeCachedCollaboration(this.thread);
+            if (!oldTurns.equals(String.valueOf(this.thread.optJSONArray("turns")))) {
+                this.renderMessages(false);
+                this.updateCollaborationChrome();
+                this.updateUsageRow();
+                return;
+            }
+        } catch (JSONException ignored) {
+            return;
+        }
+        if (this.messageQueue != null) this.messageQueue.render();
+        this.updateExecutionButton();
+        this.updateStatusLine();
     }
 
     private void loadThread(String id2) {
         if (id2.equals(this.pendingThread)) return;
         if (!id2.equals(this.threadId)) {
             this.expandedActivities.clear();
+        this.autoExpandedActivities.clear();
             this.followLatest = true;
         }
         final int generation = this.engineGeneration;
@@ -1432,8 +1817,11 @@ implements NativeEngine.Observer {
         this.pendingThread = id2;
         this.failedThread = "";
         this.resumed = false;
-        this.usage = this.viewCache.usage(id2);
-        this.applyThreadView(this.viewCache.thread(id2));
+        JSONObject display = ConversationSnapshots.forLoad(this.thread, this.viewCache.thread(id2), id2);
+        if (display != this.thread) {
+            this.usage = this.viewCache.usage(id2);
+            this.applyThreadView(display);
+        } else if (display == null) this.renderMessages(false);
         NativeEngine.call("native/chat/thread/read", NativeUi.json("engine", this.engine, "threadId", id2, "cwd", this.cwd), r -> {
             if (generation != this.engineGeneration || request != this.historyGeneration || !id2.equals(this.threadId)) return;
             this.pendingThread = "";
@@ -1467,6 +1855,7 @@ implements NativeEngine.Observer {
             if (generation != this.engineGeneration || request != this.historyGeneration || !id2.equals(this.threadId)) return;
             this.pendingThread = "";
             this.failedThread = id2;
+            if (this.thread == null) this.renderMessages(false);
             this.statusIdle();
             NativeUi.toast(this, "会话读取失败：" + message);
         });
@@ -1701,17 +2090,22 @@ implements NativeEngine.Observer {
                 actions.addView(this.drawerRow(R.drawable.ic_close, "\u5220\u9664\u4f1a\u8bdd", false, () -> {
                     new MaterialAlertDialogBuilder((Context)this)
                         .setTitle((CharSequence)"\u5220\u9664\u4f1a\u8bdd\uff1f")
-                        .setMessage((CharSequence)"\u53ea\u4ece Ai-XS \u79fb\u9664\u8fd9\u6761\u4f1a\u8bdd\u8bb0\u5f55\uff0c\u4e0d\u4f1a\u5220\u9664 Claude / DeepSeek \u81ea\u5df1\u7684\u5386\u53f2\u6587\u4ef6\u3002")
+                        .setMessage((CharSequence)"\u5c06\u5220\u9664\u672c\u4f1a\u8bdd\u7684\u6d88\u606f\u3001\u539f\u751f Agent \u5386\u53f2\u548c\u5173\u8054\u6267\u884c\u6570\u636e\u3002\u9879\u76ee\u6587\u4ef6\u53ca\u72ec\u7acb\u5206\u53c9\u4f1a\u8bdd\u4fdd\u7559\u3002")
                         .setNegativeButton((CharSequence)"\u53d6\u6d88", null)
                         .setPositiveButton((CharSequence)"\u5220\u9664", (dialog, which) -> {
                             sheet.dismiss();
                             this.call("thread/delete", NativeUi.json("threadId", id2), r -> {
                                 this.forgetSession(t);
+                                for (int i = this.drawerThreads.size() - 1; i >= 0; --i) {
+                                    if (id2.equals(this.drawerThreads.get(i).optString("id"))) this.drawerThreads.remove(i);
+                                }
                                 if (id2.equals(this.threadId)) {
                                     this.newThread();
+                                } else {
+                                    this.renderDrawer();
+                                    this.refreshDrawerData();
                                 }
-                                NativeUi.toast((Activity)this, "\u5df2\u4ece Ai-XS \u5220\u9664");
-                                this.refreshDrawerData();
+                                NativeUi.toast((Activity)this, "\u4f1a\u8bdd\u5df2\u5220\u9664");
                             });
                         }).show();
                 }, false));
@@ -1720,6 +2114,7 @@ implements NativeEngine.Observer {
     }
 
     private void chooseModel() {
+        if(this.collaboration!=null&&this.collaboration.enabled()){this.collaboration.memberField("model");return;}
         if (this.modelOptions.isEmpty()) {
             NativeUi.toast((Activity)this, "\u8bf7\u5148\u8fde\u63a5 Agent \u670d\u52a1\u5e76\u914d\u7f6e\u53ef\u7528\u6a21\u578b");
             return;
@@ -1773,6 +2168,7 @@ implements NativeEngine.Observer {
     }
 
     private void choosePermissionMode() {
+        if(this.collaboration!=null&&this.collaboration.enabled()){this.collaboration.memberField("permission");return;}
         if (this.submitting || !this.turnId.isEmpty()) {
             NativeUi.toast((Activity)this, "\u8bf7\u5148\u7b49\u5f85\u6216\u505c\u6b62\u4efb\u52a1\uff0c\u518d\u5207\u6362\u6743\u9650\u6a21\u5f0f");
             return;
@@ -1860,10 +2256,11 @@ implements NativeEngine.Observer {
         if (this.permissionLabel == null) {
             return;
         }
-        this.permissionLabel.setText(this.permissionShort());
+        this.permissionLabel.setText(this.collaboration!=null&&this.collaboration.enabled()?"成员权限":this.permissionShort());
     }
 
     private void chooseEffort() {
+        if(this.collaboration!=null&&this.collaboration.enabled()){this.collaboration.memberField("effort");return;}
         ArrayList<String> supported = this.supportedEfforts(this.model);
         if (supported.isEmpty()) {
             NativeUi.toast((Activity)this, "当前模型没有可配置的思考强度");
@@ -1889,7 +2286,7 @@ implements NativeEngine.Observer {
                 String value = values[i];
                 list.addView(this.choiceRow(labels[i] + " \u00b7 " + value, value.equals(this.effort), () -> {
                     this.effort = value;
-                    this.effortLabel.setText(this.effortName());
+                    this.effortLabel.setText(this.collaboration!=null&&this.collaboration.enabled()?"成员配置":this.effortName());
                     this.persist();
                     sheet.dismiss();
                 }, notes[i]));
@@ -1933,6 +2330,7 @@ implements NativeEngine.Observer {
     }
 
     private void chooseAgent() {
+        if(this.collaboration!=null&&this.collaboration.enabled()){this.collaboration.configure(false);return;}
         this.sheet(sheet -> {
             this.content.setPadding(0, 0, 0, Ui.dp((Context)this, 14));
             TextView heading = Ui.text((Context)this, "\u5207\u6362 Agent", 15.0f, Ui.text, Ui.medium((Context)this));
@@ -2102,16 +2500,87 @@ implements NativeEngine.Observer {
         }
     }
 
+    private boolean composerContent() {
+        return this.composer!=null&&(!this.composer.getText().toString().trim().isEmpty()||!this.attachments.isEmpty()
+                ||this.quote!=null&&!this.quote.optString("text").trim().isEmpty());
+    }
+
+    private String executionState() {
+        JSONObject control=this.thread==null?null:this.thread.optJSONObject("executionControl");
+        return control==null?"":control.optString("status");
+    }
+    /** Only a task that is actually running needs a follow-up queue. */
+    private boolean executionBusy() {
+        return !this.turnId.isEmpty() || this.collaboration != null && this.collaboration.working();
+    }
+
+    /** A stopped task does not need a continue click when ordinary queue work is ready. */
+    private boolean autoQueuePending() {
+        return ExecutionButton.autoQueuePending(this.thread);
+    }
+
+    private boolean pausedQueueWaiting() {
+        if(this.thread==null||!this.thread.optBoolean("messageQueuePaused"))return false;
+        JSONArray queue=this.thread.optJSONArray("messageQueue");
+        for(int i=0;queue!=null&&i<queue.length();i++){
+            JSONObject entry=queue.optJSONObject(i);
+            if(entry!=null&&!entry.optBoolean("executionResume")&&entry.optString("status").equals("queued"))return true;
+        }
+        return false;
+    }
+
+    private ExecutionButton.Action executionAction() {
+        boolean active=!this.turnId.isEmpty()||this.collaboration!=null&&this.collaboration.working();
+        if(!this.composerContent()&&this.autoQueuePending())return ExecutionButton.Action.WAIT;
+        return ExecutionButton.action(this.composerContent(),active,this.executionState());
+    }
+
+    private void updateExecutionButton() {
+        if(this.sendButton==null)return;
+        ExecutionButton.Action action=this.executionAction();
+        int icon=action==ExecutionButton.Action.STOP?R.drawable.ic_stop:
+                action==ExecutionButton.Action.SEND?R.drawable.ic_send:R.drawable.ic_play;
+        ((ImageView)this.sendButton.getChildAt(0)).setImageResource(icon);
+        String description=action==ExecutionButton.Action.STOP?"停止当前执行":action==ExecutionButton.Action.RESUME?"继续之前的任务":
+                action==ExecutionButton.Action.WAIT?(this.autoQueuePending()?"待发消息自动接力":this.executionState().equals("stopping")||this.executionState().equals("pausing")?"正在停止":"等待继续原任务"):
+                action==ExecutionButton.Action.SEND?(this.executionBusy()?"加入待发队列":"发送任务"):"执行任务";
+        this.sendButton.setContentDescription(description);
+        boolean enabled=!this.submitting&&action!=ExecutionButton.Action.WAIT&&action!=ExecutionButton.Action.IDLE;
+        this.sendButton.setEnabled(enabled);this.sendButton.setAlpha(enabled?1f:0.5f);
+    }
+
+    private void executionClick() {
+        if(this.submitting)return;
+        ExecutionButton.Action action=this.executionAction();
+        if(action==ExecutionButton.Action.SEND){this.sendMessage();return;}
+        if(action!=ExecutionButton.Action.STOP&&action!=ExecutionButton.Action.RESUME)return;
+        if(!NativeEngine.ready()){this.startService();return;}
+        String owner=this.threadId;this.submitting=true;this.updateControls();
+        NativeEngine.call("native/chat/execution/"+(action==ExecutionButton.Action.STOP?"interrupt":"resume"),
+                NativeUi.json("threadId",owner,"turnId",this.turnId),r->{
+            this.submitting=false;
+            if(!owner.equals(this.threadId)){this.updateControls();return;}
+            this.applyThreadView(r.optJSONObject("thread"));this.persist();this.updateControls();
+            if(this.messageQueue!=null)this.messageQueue.refresh();
+        },error->{this.submitting=false;this.updateControls();if(owner.equals(this.threadId))NativeUi.error(this,error);});
+    }
+
     private void sendMessage() {
         if (this.submitting) {
             return;
         }
-        if (!this.turnId.isEmpty()) {
-            NativeUi.toast((Activity)this, "\u5f53\u524d\u4efb\u52a1\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f85\u6216\u505c\u6b62");
-            return;
+        String draft = this.composer.getText().toString().trim();
+        String text = draft;
+        if (this.quote != null) {
+            String quoted = this.quote.optString("text", "").trim();
+            String sender = this.quote.optString("sender", "").trim();
+            if (!quoted.isEmpty()) {
+                text = "> " + (sender.isEmpty() ? "\u5f15\u7528" : "\u5f15\u7528 " + sender) + "\uff1a\n> "
+                        + quoted.replace("\r\n", "\n").replace("\n", "\n> ") + "\n\n" + draft;
+            }
         }
-        String text = this.composer.getText().toString().trim();
         if (text.isEmpty() && this.attachments.isEmpty()) {
+            this.executionClick();
             return;
         }
         if (!NativeEngine.ready()) {
@@ -2134,26 +2603,62 @@ implements NativeEngine.Observer {
         for (JSONObject image : this.attachments) {
             input.put(image);
         }
+        String originalThread = this.threadId;
+        int originalEngineGeneration = this.engineGeneration;
         Runnable submit = () -> {
+            String owner = this.threadId;
+            if(this.collaboration.enabled()){
+                Consumer<JSONObject> accepted = r -> {
+                    this.submitting=false;
+                    if(!owner.equals(this.threadId)){this.updateControls();return;}
+                    this.composer.setText("");this.attachments.clear();this.quote=null;this.refreshQuote();this.updateAttach();
+                    this.applyThreadView(r.optJSONObject("thread"));this.persist();this.updateControls();this.refreshDrawerData();
+                };
+                Consumer<String> rejected = message -> {
+                    this.submitting=false;this.updateControls();
+                    if(owner.equals(this.threadId))NativeUi.error(this,message);
+                };
+                if(this.executionBusy()) this.collaboration.submit(input,accepted,rejected);
+                else this.collaboration.submitNow(input,accepted,rejected);
+                return;
+            }
             this.normalizeEffort();
-            this.call("turn/start", NativeUi.json("threadId", this.threadId, "input", input, "model", this.model, "effort", this.effort, "clientUserMessageId", UUID.randomUUID().toString()), r -> {
+            String fingerprint=this.threadId+"independent"+input.toString();
+            android.content.SharedPreferences requests=getSharedPreferences("message-queue-requests",0);
+            String request=requests.getString("fingerprint","").equals(fingerprint)?requests.getString("request",UUID.randomUUID().toString()):UUID.randomUUID().toString();
+            requests.edit().putString("fingerprint",fingerprint).putString("request",request).apply();
+            boolean queued = this.executionBusy();
+            JSONObject args = NativeUi.json("threadId", this.threadId, "input", input, "model", this.model, "effort", this.effort, "clientRequestId", request);
+            if (queued) try { args.put("mode", "independent"); } catch (JSONException ignored) {}
+            else try { args.put("engine", this.engine); } catch (JSONException ignored) {}
+            this.call(queued ? "native/chat/queue/submit" : "native/chat/turn/start", args, r -> {
             this.submitting = false;
-            if (r.optBoolean("queued")) NativeUi.toast(this, r.optString("message", "任务已排队"));
+            requests.edit().remove("fingerprint").remove("request").apply();
+            if(!owner.equals(this.threadId)){this.updateControls();this.refreshDrawerData();return;}
+            if (r.optBoolean("queued")) NativeUi.toast(this, r.optString("message", queued ? "任务已排队" : "等待执行名额，稍后开始"));
             if (r.optBoolean("handoffClipped")) NativeUi.toast(this, "较长历史已节选交接，完整记录保留供 Agent 读取");
             this.composer.setText("");
             this.attachments.clear();
+            this.quote = null;
+            this.refreshQuote();
             this.updateAttach();
+            JSONObject responseThread = r.optJSONObject("thread");
+            if (responseThread != null) this.applyThreadView(responseThread);
             JSONObject turn = r.optJSONObject("turn");
-            if (turn != null) {
+            /* The response thread already contains the started turn. Merging it again rebuilt
+               the same live turn twice, which showed up as a flash when execution began. */
+            if (turn != null && this.currentTurn(turn.optString("id")) == null) {
+                turn = ConversationContent.startedTurn(null, turn);
                 this.putTurn(turn);
                 this.turnId = "inProgress".equals(turn.optString("status")) ? turn.optString("id") : "";
+                this.renderMessages(false);
             }
             this.persist();
-            this.renderMessages(true);
         });
         };
         if (this.threadId.isEmpty()) {
             this.call("thread/start", NativeUi.json("cwd", this.cwd, "model", this.model), r -> {
+                if(!originalThread.equals(this.threadId)||originalEngineGeneration!=this.engineGeneration){this.submitting=false;this.updateControls();return;}
                 this.thread = r.optJSONObject("thread");
                 this.threadId = this.thread.optString("id");
                 this.resumed = true;
@@ -2162,6 +2667,7 @@ implements NativeEngine.Observer {
             });
         } else if (!this.resumed) {
             this.call("thread/resume", NativeUi.json("threadId", this.threadId), r -> {
+                if(!originalThread.equals(this.threadId)||originalEngineGeneration!=this.engineGeneration){this.submitting=false;this.updateControls();return;}
                 this.resumed = true;
                 submit.run();
             });
@@ -2172,6 +2678,7 @@ implements NativeEngine.Observer {
 
     private String stoppingTurn = "";
     private void interrupt() {
+        if(this.turnId.isEmpty()&&this.collaboration.working()){this.collaboration.stop();return;}
         if (this.turnId.isEmpty() || this.turnId.equals(this.stoppingTurn)) {
             return;
         }
@@ -2198,7 +2705,7 @@ implements NativeEngine.Observer {
             boolean running = false;
             for (int i = 0; turns != null && i < turns.length(); i++) {
                 JSONObject turn = turns.optJSONObject(i);
-                if (turn != null && target.equals(turn.optString("id"))) running = "inProgress".equals(turn.optString("status"));
+                if (turn != null && target.equals(turn.optString("id"))) running = NativeHomeActivity.turnActive(turn.optString("status"));
             }
             if (!running) {
                 this.stoppingTurn = "";
@@ -2299,7 +2806,24 @@ implements NativeEngine.Observer {
 
     @Override
     public void event(JSONObject event) {
-        if (event.has("workflowId")) return;
+        if (event.has("workflowId")) {
+            if(!event.optString("conversationId").isEmpty()&&!this.threadId.equals(event.optString("conversationId")))return;
+            if(this.collaboration.stream(event))this.repaint.request();
+            if(this.collaboration.owns(event.optString("workflowId"))&&event.optString("type").equals("approval"))this.showApproval(event);
+            String method=event.optString("method");
+            if(event.optLong("attemptSequence")<=0||method.equals("turn/started")||method.equals("turn/completed")
+                ||method.equals("serverRequest/resolved")||event.optString("type").equals("approval")
+                ||CollaborationEvents.turn(this.thread,event.optString("workflowId"))==null)this.collaborationRefresh.request();
+            return;
+        }
+        if(event.optString("method").equals("collaboration/changed")){
+            JSONObject params=event.optJSONObject("params");
+            if(params!=null&&this.threadId.equals(params.optString("conversationId")))this.collaborationRefresh.request();return;
+        }
+        if(event.optString("method").equals("native/queueChanged")){
+            JSONObject params=event.optJSONObject("params");
+            if(params!=null&&this.threadId.equals(params.optString("threadId")))this.queueRefresh.request();return;
+        }
         block29: {
             String type = event.optString("type");
             if ("native/threadsChanged".equals(event.optString("method"))) {
@@ -2313,6 +2837,14 @@ implements NativeEngine.Observer {
             if (type.equals("native/stopped")) {
                 this.status("Agent \u670d\u52a1\u5df2\u505c\u6b62", Ui.warn, true);
                 this.updateControls();
+                return;
+            }
+            if (type.equals("native/cleanup")) {
+                int purged = event.optInt("purged", 0);
+                int failed = event.optInt("failed", 0);
+                if (purged > 0) NativeUi.toast((Activity)this, "\u5df2\u6e05\u7406 " + purged + " \u4e2a\u5df2\u5220\u9664\u4f1a\u8bdd\u7684\u6b8b\u7559\u6570\u636e");
+                if (failed > 0) NativeUi.toast((Activity)this, "\u6709 " + failed + " \u4e2a\u5df2\u5220\u9664\u4f1a\u8bdd\u5f85\u4e0b\u6b21\u542f\u52a8\u91cd\u8bd5");
+                this.refreshDrawerData();
                 return;
             }
             if (type.equals("approval")) {
@@ -2361,7 +2893,6 @@ implements NativeEngine.Observer {
                     JSONObject t2 = p.getJSONObject("turn");
                     if (p.has("progress")) t2.put("progress", p.optJSONObject("progress"));
                     this.putTurn(t2);
-                    this.loadThread(this.threadId);
                     this.turnId = t2.getString("id");
                     this.turnStartedAt = SystemClock.elapsedRealtime();
                     this.startTurnClock();
@@ -2384,115 +2915,172 @@ implements NativeEngine.Observer {
                     if (this.collaborationAfterTurn) { this.collaborationAfterTurn=false;this.handler.postDelayed(this::openCollaboration, 500); }
                     return;
                 }
+                JSONObject active = this.currentTurn(p.optString("turnId", this.turnId));
+                if (active == null && (p.isNull("turnId") || !p.has("turnId"))) active = this.currentTurn(this.turnId);
                 if (method.equals("item/started") || method.equals("item/completed")) {
-                    this.item(this.currentTurn(p.optString("turnId")), p.getJSONObject("item"));
-                    this.handler.removeCallbacks(this.repaint);
-                    this.handler.postDelayed(this.repaint, 40L);
-                    break block29;
-                }
-                if (method.equals("item/commandExecution/outputDelta") || method.equals("item/fileChange/outputDelta")
-                    || method.equals("item/mcpToolCall/progress")) {
-                    JSONObject active = this.currentTurn(p.optString("turnId"));
-                    JSONArray items = active == null ? null : active.optJSONArray("items");
-                    if (items != null) for (int i = 0; i < items.length(); i++) {
-                        JSONObject target = items.optJSONObject(i);
-                        if (target == null || !target.optString("id").equals(p.optString("itemId"))) continue;
-                        if (method.endsWith("/progress")) target.put("progressMessage", p.optString("message"));
-                        else target.put("aggregatedOutput", target.optString("aggregatedOutput") + p.optString("delta"));
-                        break;
-                    }
-                    break block29;
-                }
-                if (method.equals("item/reasoning/textDelta") || method.equals("item/reasoning/summaryTextDelta") || method.equals("item/reasoning/summaryPartAdded")) {
-                    if (p.optString("delta").isEmpty()) {
-                        return;
-                    }
-                    JSONObject t3 = this.currentTurn(p.optString("turnId"));
-                    if (t3 == null) break block29;
-                    JSONArray items = t3.optJSONArray("items");
-                    JSONObject target = null;
-                    if (items != null) {
-                        for (int i = 0; i < items.length(); ++i) {
-                            if (!items.optJSONObject(i).optString("id").equals(p.optString("itemId"))) continue;
-                            target = items.optJSONObject(i);
-                        }
-                    }
-                    if (target == null) {
-                        target = NativeUi.json("id", p.optString("itemId"), "type", "reasoning", "content", new JSONArray());
-                        this.item(t3, target);
-                    }
-                    String delta = p.optString("delta");
-                    if (method.equals("item/reasoning/summaryTextDelta")) {
-                        JSONArray summary = target.optJSONArray("summary");
-                        if (summary == null) {
-                            summary = new JSONArray();
-                            try {
-                                target.put("summary", summary);
-                            }
-                            catch (JSONException jSONException) {
-                                // empty catch block
-                            }
-                        }
-                        String current = summary.length() > 0 ? summary.optString(0) : "";
-                        try {
-                            summary.put(0, current + delta);
-                        }
-                        catch (JSONException jSONException) {}
-                        break block29;
-                    }
-                    JSONArray content = target.optJSONArray("content");
-                    if (content == null) {
-                        content = new JSONArray();
-                        try {
-                            target.put("content", content);
-                        }
-                        catch (JSONException current) {
-                            // empty catch block
-                        }
-                    }
-                    String current = content.length() > 0 ? content.optString(0) : "";
-                    try {
-                        content.put(0, current + delta);
-                    }
-                    catch (JSONException jSONException) {}
-                    break block29;
-                }
-                if (method.equals("item/agentMessage/delta") && (t = this.currentTurn(p.optString("turnId"))) != null) {
-                    JSONArray items = t.optJSONArray("items");
-                    JSONObject target = null;
-                    if (items != null) {
-                        for (int i = 0; i < items.length(); ++i) {
-                            if (!items.optJSONObject(i).optString("id").equals(p.optString("itemId"))) continue;
-                            target = items.optJSONObject(i);
-                        }
-                    }
-                    if (target == null) {
-                        target = NativeUi.json("id", p.optString("itemId"), "type", "agentMessage", "text", "");
-                        this.item(t, target);
-                    }
-                    target.put("text", target.optString("text") + p.optString("delta"));
-                }
+                    JSONObject raw = p.optJSONObject("item");
+                    if (raw != null && "userMessage".equals(raw.optString("type"))) {
+                        this.item(active, raw);
+                    } else RealtimeEvents.apply(active, method, p);
+                } else RealtimeEvents.apply(active, method, p);
             }
             catch (JSONException jSONException) {
                 // empty catch block
             }
         }
-        this.handler.removeCallbacks(this.repaint);
-        this.handler.postDelayed(this.repaint, 60L);
+        this.repaint.request();
     }
 
-    private static String turnSignature(JSONObject turn) {
-        StringBuilder out = new StringBuilder(ConversationContent.string(turn, "id", ""));
-        out.append('|').append(ConversationContent.string(turn, "status", ""));
-        JSONArray items = turn.optJSONArray("items");
-        if (items != null) {
-            for (int i = 0; i < items.length(); ++i) {
-                JSONObject entry = items.optJSONObject(i);
+    private final CoalescedUpdate collaborationRefresh = new CoalescedUpdate(
+        () -> { if(this.collaboration!=null)this.collaboration.refresh(); },
+        task -> this.handler.postDelayed(task, 250L), task -> this.handler.removeCallbacks(task));
+    private final CoalescedUpdate queueRefresh = new CoalescedUpdate(
+        () -> {if(this.messageQueue!=null)this.messageQueue.refresh();},
+        task -> this.handler.postDelayed(task,150L),task -> this.handler.removeCallbacks(task));
+
+    /** Load older collaboration entries; keep the viewport anchored while prepending. */
+    private void loadEarlierCollaboration(JSONObject turn) {
+        if (loadingCollaborationHistory || turn == null || this.chat == null || this.messages == null) return;
+        String workflow = turn.optString("workflowId");
+        if (workflow.isEmpty()) return;
+        JSONArray before = turn.optJSONArray("historyBefore");
+        if (before == null || before.length() != 2) return;
+        loadingCollaborationHistory = true;
+        historyAnchorScroll = this.chat.getScrollY();
+        historyAnchorHeight = this.messages.getHeight();
+        this.followLatest = false;
+        JSONObject args = NativeUi.json("workflowId", workflow, "before", before, "limit", 40);
+        NativeEngine.call("native/collaboration/conversation", args, r -> {
+            loadingCollaborationHistory = false;
+            if (isFinishing() || isDestroyed() || this.thread == null) return;
+            JSONArray entries = r.optJSONArray("entries");
+            JSONObject cached = collaborationHistory.get(workflow);
+            if (cached == null) cached = new JSONObject();
+            JSONArray all = cached.optJSONArray("entries");
+            if (all == null) all = new JSONArray();
+            for (int i = 0; entries != null && i < entries.length(); i++) {
+                JSONObject entry = entries.optJSONObject(i);
                 if (entry == null) continue;
-                out.append('|').append(ConversationContent.string(entry, "id", String.valueOf(i))).append(':').append(ConversationContent.string(entry, "type", "")).append(':').append(ConversationContent.string(entry, "status", "")).append(':').append(ConversationContent.item(entry).length());
+                String id = entry.optString("id");
+                boolean duplicate = false;
+                for (int j = 0; j < all.length(); j++) {
+                    if (id.equals(all.optJSONObject(j) == null ? "" : all.optJSONObject(j).optString("id"))) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) all.put(entry);
             }
+            ArrayList<JSONObject> sorted = new ArrayList<>();
+            for (int i = 0; i < all.length(); i++) {
+                JSONObject item = all.optJSONObject(i);
+                if (item != null) sorted.add(item);
+            }
+            sorted.sort((left, right) -> {
+                int at = Double.compare(left.optDouble("at", 0), right.optDouble("at", 0));
+                return at != 0 ? at : left.optString("id").compareTo(right.optString("id"));
+            });
+            JSONArray ordered = new JSONArray();
+            for (JSONObject item : sorted) ordered.put(item);
+            try {
+                cached.put("entries", ordered);
+                cached.put("hasMore", r.optBoolean("hasMore"));
+                cached.put("before", r.optJSONArray("before"));
+                cached.put("partial", r.optBoolean("historyPartial"));
+                cached.put("omitted", r.optInt("omittedItems"));
+            } catch (Exception ignored) {}
+            collaborationHistory.put(workflow, cached);
+            mergeCachedCollaboration(this.thread);
+            this.renderMessages(false);
+        }, e -> {
+            loadingCollaborationHistory = false;
+            historyAnchorScroll = -1;
+            NativeUi.error(this, e);
+        });
+    }
+
+    private void mergeCachedCollaboration(JSONObject thread) {
+        if (thread == null) return;
+        JSONArray turns = thread.optJSONArray("turns");
+        for (int i = 0; turns != null && i < turns.length(); i++) {
+            JSONObject turn = turns.optJSONObject(i);
+            if (turn == null) continue;
+            String workflow = turn.optString("workflowId");
+            JSONObject cached = collaborationHistory.get(workflow);
+            if (cached == null) continue;
+            mergeHistoryEntries(turn, cached.optJSONArray("entries"));
+            try {
+                if (cached.has("hasMore")) turn.put("historyHasMore", cached.optBoolean("hasMore"));
+                if (cached.has("before")) turn.put("historyBefore", cached.opt("before"));
+                if (cached.has("partial")) turn.put("historyPartial", cached.optBoolean("partial"));
+                int omitted = cached.optInt("omitted", 0);
+                if (omitted > turn.optInt("historyOmittedItems", 0)) turn.put("historyOmittedItems", omitted);
+            } catch (Exception ignored) {}
         }
-        return out.append('|').append(ConversationContent.error(turn)).toString();
+    }
+
+    private void mergeHistoryEntries(JSONObject turn, JSONArray entries) {
+        if (entries == null || entries.length() == 0) return;
+        JSONArray existing = turn.optJSONArray("items");
+        if (existing == null) existing = new JSONArray();
+        HashSet<String> ids = new HashSet<>();
+        for (int i = 0; i < existing.length(); i++) {
+            JSONObject item = existing.optJSONObject(i);
+            if (item != null) ids.add(item.optString("id"));
+        }
+        ArrayList<JSONObject> add = new ArrayList<>();
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.optJSONObject(i);
+            if (entry == null) continue;
+            String id = entry.optString("id");
+            if (id.isEmpty() || ids.contains(id)) continue;
+            JSONObject item = historyItem(entry);
+            if (item == null) continue;
+            ids.add(id);
+            add.add(item);
+        }
+        if (add.isEmpty()) return;
+        add.sort((left, right) -> {
+            int at = Double.compare(left.optDouble("at", 0), right.optDouble("at", 0));
+            return at != 0 ? at : left.optString("id").compareTo(right.optString("id"));
+        });
+        JSONArray merged = new JSONArray();
+        for (JSONObject item : add) merged.put(item);
+        for (int i = 0; i < existing.length(); i++) merged.put(existing.opt(i));
+        try { turn.put("items", merged); } catch (Exception ignored) {}
+    }
+
+    private JSONObject historyItem(JSONObject entry) {
+        String kind = entry.optString("kind");
+        String id = entry.optString("id");
+        try {
+            JSONObject item;
+            if (kind.equals("user")) {
+                item = new JSONObject().put("type", "userMessage").put("content",
+                    new JSONArray().put(new JSONObject().put("type", "text").put("text", entry.optString("text"))));
+            } else if (kind.equals("error")) {
+                item = new JSONObject().put("type", "agentMessage").put("text", entry.optString("text"))
+                    .put("collaborationError", true);
+            } else {
+                item = entry.optJSONObject("item");
+                if (item == null) return null;
+                item = new JSONObject(item.toString());
+            }
+            item.put("id", id);
+            item.put("participant", entry.optString("participant"));
+            item.put("participantId", entry.optString("participantId"));
+            item.put("engine", entry.optString("engine"));
+            item.put("model", entry.optString("model"));
+            item.put("taskId", entry.optString("taskId"));
+            item.put("taskTitle", entry.optString("taskTitle"));
+            item.put("attemptId", entry.optString("attemptId"));
+            item.put("attemptNumber", entry.optInt("attemptNumber", 1));
+            item.put("attemptStatus", entry.optString("attemptStatus"));
+            item.put("at", entry.optDouble("at", 0));
+            return item;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private void renderMessages(boolean animate) {
@@ -2500,12 +3088,14 @@ implements NativeEngine.Observer {
             return;
         }
         int previousScroll = this.chat.getScrollY();
-        int previousHeight = this.messages.getHeight();
         boolean scrollToLatest = this.followLatest;
         boolean structure = false;
         this.turnId = "";
         String heading = "\u65b0\u5bf9\u8bdd";
         boolean streaming = false;
+        boolean suppress = android.os.Build.VERSION.SDK_INT >= 29;
+        if (suppress) this.messages.suppressLayout(true);
+        this.currentInsight = SessionInsight.of(this.thread);
         if (this.thread == null) {
             if (this.messages.getChildCount() > 0) {
                 structure = true;
@@ -2513,14 +3103,24 @@ implements NativeEngine.Observer {
             this.messages.removeAllViews();
             this.turnHosts.clear();
             this.turnSigs.clear();
-            this.emptyState();
+            this.turnRunning.clear();
+            if (this.threadId.isEmpty()) this.emptyState();
+            else {
+                heading = this.failedThread.equals(this.threadId) ? "会话读取失败" : "正在读取会话";
+                TextView pending = Ui.text(this, heading + "…", 14, Ui.muted, null);
+                Ui.pad(pending, 20, 24, 20, 24);
+                this.messages.addView(pending, Ui.fill());
+            }
             this.emptyRendered = true;
+            this.updateInsightEntry();
+            if (this.insightPanel != null) this.insightPanel.update(null);
         } else {
             int count;
             if (this.emptyRendered) {
                 this.messages.removeAllViews();
                 this.turnHosts.clear();
                 this.turnSigs.clear();
+                this.turnRunning.clear();
                 this.emptyRendered = false;
                 structure = true;
             }
@@ -2530,13 +3130,14 @@ implements NativeEngine.Observer {
             while (this.turnHosts.size() > count) {
                 this.messages.removeView(this.turnHosts.remove(this.turnHosts.size() - 1));
                 this.turnSigs.remove(this.turnSigs.size() - 1);
+                if (!this.turnRunning.isEmpty()) this.turnRunning.remove(this.turnRunning.size() - 1);
                 structure = true;
             }
             for (int i = 0; i < count; ++i) {
                 LinearLayout host;
                 JSONObject turn = turns.optJSONObject(i);
                 if (turn == null) continue;
-                boolean running = "inProgress".equals(ConversationContent.string(turn, "status", ""));
+                boolean running = NativeHomeActivity.turnActive(ConversationContent.string(turn, "status", ""));
                 if (running) {
                     this.turnId = ConversationContent.string(turn, "id", "");
                     if (this.turnStartedAt == 0L) {
@@ -2545,7 +3146,11 @@ implements NativeEngine.Observer {
                         this.handler.post(this.ticker);
                     }
                 }
-                String signature = NativeHomeActivity.turnSignature(turn);
+                boolean settled = i < this.turnRunning.size() && !this.turnRunning.get(i);
+                String signature = RealtimeEvents.renderSignature(turn,running,settled,
+                        i < this.turnSigs.size() ? this.turnSigs.get(i) : null);
+                if (i < this.turnRunning.size()) this.turnRunning.set(i, running);
+                else this.turnRunning.add(running);
                 if (i < this.turnHosts.size()) {
                     host = this.turnHosts.get(i);
                     if (signature.equals(this.turnSigs.get(i))) {
@@ -2566,24 +3171,28 @@ implements NativeEngine.Observer {
                 streaming = true;
             }
         }
+        if (suppress) this.messages.suppressLayout(false);
         this.topTitle.setText(heading.length() > 42 ? heading.substring(0, 42) + "\u2026" : heading);
         this.updateSubtitle();
         this.updateControls();
+        this.updateInsightEntry();
+        if (this.insightPanel != null && this.thread != null) this.insightPanel.update(this.thread, this.currentInsight);
         if (animate && structure) {
             for (int i = Math.max(0, this.messages.getChildCount() - 3); i < this.messages.getChildCount(); ++i) {
                 Ui.enter(this.messages.getChildAt(i), i);
             }
         }
         this.chat.post(() -> {
-            if (this.thread == null) {
+            if (historyAnchorScroll >= 0 && this.messages.getHeight() > 0) {
+                int delta = this.messages.getHeight() - this.historyAnchorHeight;
+                this.chat.scrollTo(0, Math.max(0, this.historyAnchorScroll + delta));
+                historyAnchorScroll = -1;
+                historyAnchorHeight = 0;
+            } else if (this.thread == null) {
                 this.chat.scrollTo(0, 0);
             } else if (scrollToLatest) {
-                int delta = this.messages.getHeight() - previousHeight;
-                if (previousHeight > 0 && delta > 0 && delta < this.chat.getHeight()) {
-                    this.chat.scrollBy(0, delta);
-                } else {
-                    this.chat.scrollTo(0, Math.max(0, this.messages.getHeight() - this.chat.getHeight() + this.chat.getPaddingBottom()));
-                }
+                /* 直接贴底：按高度差滚动会在重建、行高抖动时把视口甩到中途。 */
+                this.chat.scrollTo(0, Math.max(0, this.messages.getHeight() - this.chat.getHeight() + this.chat.getPaddingBottom()));
             } else {
                 this.chat.scrollTo(0, previousScroll);
             }
@@ -2595,15 +3204,34 @@ implements NativeEngine.Observer {
         }
     }
 
+    private static String reasoningText(JSONObject entry) {
+        StringBuilder builder = new StringBuilder();
+        JSONArray summary = entry.optJSONArray("summary");
+        for (int i = 0; summary != null && i < summary.length(); i++) {
+            JSONObject part = summary.optJSONObject(i);
+            builder.append(part == null ? summary.optString(i) : part.optString("text"));
+        }
+        if (builder.length() == 0) {
+            JSONArray content = entry.optJSONArray("content");
+            for (int i = 0; content != null && i < content.length(); i++) {
+                JSONObject part = content.optJSONObject(i);
+                builder.append(part == null ? content.optString(i) : part.optString("text"));
+            }
+        }
+        return builder.toString();
+    }
+
+    private static boolean turnActive(String status) {
+        return "inProgress".equals(status) || "starting".equals(status) || "running".equals(status) || "executing".equals(status);
+    }
+
     private boolean renderTurn(LinearLayout host, JSONObject turn, boolean running) {
+        if(turn.has("workflowId"))return this.renderCollaborationTurn(host,turn);
         this.renderingEngine = ConversationContent.string(turn, "engine", this.engine);
         String error;
         boolean live = false;
         JSONArray items = turn.optJSONArray("items");
-        /*
-         * 运行中把思考、命令、文件修改和工具调用都展开，方便看进度；
-         * 结束后这些中间过程不再占据消息流，只保留最后一条最终答复。
-         */
+        // Keep tool history available and display even an empty activity at its start.
         int summaryIndex = -1;
         if (!running && items != null) {
             for (int j = items.length() - 1; j >= 0; --j) {
@@ -2619,37 +3247,49 @@ implements NativeEngine.Observer {
                 boolean tail;
                 JSONObject entry = items.optJSONObject(j);
                 if (entry == null) continue;
+                String childKey = SessionInsight.childKey(entry, this.renderingEngine);
+                if (childKey != null) {
+                    ArrayList<JSONObject> group = new ArrayList<JSONObject>();
+                    group.add(entry);
+                    int end = j + 1;
+                    while (end < items.length()) {
+                        JSONObject next = items.optJSONObject(end);
+                        if (next == null || !childKey.equals(SessionInsight.childKey(next, this.renderingEngine))) break;
+                        group.add(next);
+                        ++end;
+                    }
+                    live |= this.renderChildGroup(host, turn, childKey, group, running);
+                    j = end - 1;
+                    continue;
+                }
                 String type = ConversationContent.string(entry, "type", "");
-                String text = ConversationContent.item(entry);
-                if (text.isEmpty()) continue;
+                String extracted = ConversationContent.item(entry);
+                if (extracted.isEmpty() && type.equals("reasoning")) extracted = NativeHomeActivity.reasoningText(entry);
+                final String text = extracted;
+                if (text.isEmpty() && (type.equals("userMessage") || type.equals("agentMessage"))) continue;
                 boolean bl = tail = running && j == items.length() - 1;
                 if (type.equals("userMessage")) {
                     String sourceThread = this.threadId;
-                    this.transcript().user(host, text, () -> this.editMessage(sourceThread, turn, entry), () -> this.quoteMessage(text));
+                    this.transcript().user(host, text, () -> this.editMessage(sourceThread, turn, entry), () -> this.quoteMessage(text, "\u6211"));
                     continue;
                 }
                 if (type.equals("agentMessage")) {
                     if (!running && j != summaryIndex) continue;
-                    this.transcript().assistant(host, text, tail, tail ? "" : this.turnFooter(ConversationContent.string(turn, "id", "")), () -> this.quoteMessage(text));
+                    this.transcript().assistant(host, text, tail, tail ? "" : this.turnFooter(ConversationContent.string(turn, "id", "")), () -> this.quoteMessage(text, NativeUi.engineName(this.engine)));
                     live |= tail;
                     continue;
                 }
-                if (!running) continue;
-                String label = type.equals("reasoning") ? "\u601d\u8003\u8fc7\u7a0b" : (type.equals("commandExecution") ? "\u8fd0\u884c\u547d\u4ee4" : (type.equals("fileChange") ? "\u6587\u4ef6\u4fee\u6539" : "\u5de5\u5177 \u00b7 " + ConversationContent.string(entry, "tool", type)));
-                String state = ConversationContent.string(entry, "status", "");
-                if (type.equals("reasoning") && tail) {
-                    label = label + " \u00b7 \u601d\u8003\u4e2d";
-                } else if (state.equals("inProgress")) {
-                    label = label + " \u00b7 \u8fdb\u884c\u4e2d";
-                }
-                if (state.equals("failed")) {
-                    label = label + " \u00b7 \u5931\u8d25";
-                }
+                String label = RealtimeEvents.label(entry, running);
                 String id2 = ConversationContent.string(turn, "id", "") + ":" + ConversationContent.string(entry, "id", String.valueOf(j));
-                if (type.equals("reasoning") && running && !this.expandedActivities.contains(id2)) {
+                if (type.equals("reasoning") && running && this.autoExpandedActivities.add(id2)) {
                     this.expandedActivities.add(id2);
                 }
-                this.transcript().activity(host, id2, label, type, text, this.expandedActivities);
+                if (type.equals("fileReport")) {
+                    JSONObject counts = entry.optJSONObject("counts");
+                    int total = counts == null ? 0 : counts.optInt("created", 0) + counts.optInt("modified", 0) + counts.optInt("deleted", 0);
+                    if (total == 0) continue;
+                }
+                this.transcript().activity(host, id2, label, type, text, this.expandedActivities, RealtimeEvents.preview(entry), entry);
                 live |= tail;
             }
         }
@@ -2660,7 +3300,138 @@ implements NativeEngine.Observer {
         } else if (!(error = ConversationContent.error(turn)).isEmpty()) {
             this.errorLine(host, error);
         }
-        return live;
+        return live || running;
+    }
+
+    private static boolean collaborationFinished(String status) {
+        return status.equals("completed") || status.equals("cancelled") || status.equals("failed")
+            || status.equals("interrupted") || status.equals("awaiting_acceptance")
+            || status.equals("partial_failure") || status.equals("needs_reconciliation")
+            || status.equals("succeeded");
+    }
+
+    private boolean renderCollaborationTurn(LinearLayout host,JSONObject turn){
+        JSONArray items=turn.optJSONArray("items");boolean live=false;JSONArray reports=new JSONArray();
+        if (turn.optBoolean("historyHasMore")) {
+            ConversationRenderer earlier = new ConversationRenderer(this, "");
+            host.addView(earlier.ghost(loadingCollaborationHistory ? "正在加载更早记录…" : "加载更早记录",
+                R.drawable.ic_history, () -> loadEarlierCollaboration(turn)));
+        }
+        for(int i=0;items!=null&&i<items.length();i++){
+            JSONObject item=items.optJSONObject(i);if(item==null)continue;
+            String type=item.optString("type");String rawText=ConversationContent.item(item);String itemId=item.optString("id");
+            if(rawText.isEmpty()&&type.equals("reasoning"))rawText=NativeHomeActivity.reasoningText(item);
+            final String text=rawText;
+            if(type.equals("userMessage")){
+                new ConversationRenderer(this,"").user(host,text,()->{
+                    this.composer.setText(ConversationContent.editableText(item));this.composer.requestFocus();
+                    NativeUi.toast(this,"内容已带回输入框，修改后发送，原记录保留");
+                },()->this.quoteMessage(text,"\u6211"));continue;
+            }
+            String source=NativeUi.engineName(item.optString("engine"))+" · "+item.optString("model");
+            ConversationRenderer renderer=new ConversationRenderer(this,source);
+            boolean active=Arrays.asList("starting","running","waiting_input","stopping").contains(item.optString("attemptStatus"));
+            boolean generating=active&&RealtimeEvents.active(item.optString("status"));
+            if(item.optBoolean("collaborationError")){this.errorLine(host,item.optString("participant")+" · "+text);continue;}
+            if(type.equals("agentMessage")||type.equals("assistantMessage")){
+                if(!text.isEmpty())renderer.assistant(host,text,generating,item.optString("participant")+" · 尝试 "+item.optInt("attemptNumber",1),()->this.quoteMessage(text,source));
+            }else{
+                if (type.equals("fileReport")) {
+                    JSONObject counts = item.optJSONObject("counts");
+                    int total = counts == null ? 0 : counts.optInt("created", 0) + counts.optInt("modified", 0) + counts.optInt("deleted", 0);
+                    // A collaboration's file inventory is published once, after the project stops.
+                    if (total > 0) reports.put(item);
+                    continue;
+                }
+                String label=RealtimeEvents.label(item,active);
+                if (type.equals("reasoning") && generating && this.autoExpandedActivities.add(itemId)) this.expandedActivities.add(itemId);
+                String speaker=item.optString("participant","");
+                renderer.activity(host,itemId,(speaker.isEmpty()?"":speaker+" · ")+label,type,text,this.expandedActivities,RealtimeEvents.preview(item),item);
+            }
+            live|=generating;
+        }
+        String workflowStatus=turn.optString("collaborationStatus");
+        if (reports.length() > 0 && collaborationFinished(workflowStatus)) {
+            new ConversationRenderer(this,"").collaborationFiles(host,reports,workflowStatus);
+        }
+        JSONObject delivery=turn.optJSONObject("delivery");
+        String deliveryLabel=delivery==null?"":CollaborationStatus.delivery(delivery.optString("status"));
+        String status=ConversationCollaboration.state(workflowStatus)+" · "+turn.optInt("collaborationCompleted")+" / "+turn.optInt("collaborationTotal")
+            +(deliveryLabel.isEmpty()?"":" · "+deliveryLabel);
+        ConversationRenderer actions=new ConversationRenderer(this,"");
+        host.addView(actions.ghost(status+" · 本轮协作",R.drawable.ic_spark,()->this.collaboration.round(turn.optString("workflowId"))));
+        int omitted=turn.optInt("historyOmittedItems",0);
+        if(omitted>0){TextView partial=Ui.text(this,"部分过程未保留（已淘汰 "+omitted+" 条），分页也无法找回。",11,Ui.warn,null);host.addView(partial);}
+        else if(turn.optBoolean("historyPartial")){TextView partial=Ui.text(this,"部分较早过程未完整保留，已显示可恢复的记录。",11,Ui.faint,null);host.addView(partial);}
+        return live||turn.optString("collaborationStatus").equals("running");
+    }
+
+    private boolean renderChildGroup(LinearLayout host, JSONObject turn, String key, ArrayList<JSONObject> group, boolean running) {
+        SessionInsight.Subagent child = this.currentInsight == null ? null : this.currentInsight.child(key);
+        JSONObject last = group.get(group.size() - 1);
+        String status;
+        boolean active;
+        if (child != null) {
+            status = child.status;
+            active = child.active();
+        } else {
+            String raw = ConversationContent.string(last, "status", "");
+            status = SessionInsight.normalizeStatus(raw.isEmpty() ? (running ? "inProgress" : "completed") : raw);
+            active = SessionInsight.active(status);
+        }
+        String engine = child != null && !child.engine.isEmpty() ? child.engine
+            : ConversationContent.string(last, "sourceEngine", this.renderingEngine);
+        String model = child != null && !child.model.isEmpty() ? child.model
+            : ConversationContent.string(last, "sourceModel", "");
+        String title;
+        if (child != null && !child.title.isEmpty()) title = child.title;
+        else title = (engine.isEmpty() ? "子代理" : NativeUi.engineName(engine) + " 子代理");
+        StringBuilder meta = new StringBuilder();
+        if (!engine.isEmpty()) meta.append(NativeUi.engineName(engine));
+        if (!model.isEmpty()) {
+            if (meta.length() > 0) meta.append(" · ");
+            meta.append(NativeHomeActivity.shortModel(model));
+        }
+        if (child != null) {
+            if (child.tools > 0) meta.append(meta.length() > 0 ? " · " : "").append("工具 ").append(child.tools);
+            if (child.messages > 0) meta.append(meta.length() > 0 ? " · " : "").append("回复 ").append(child.messages);
+            if (child.durationMs > 0) meta.append(meta.length() > 0 ? " · " : "").append(SessionInsight.duration(child.durationMs));
+            else if (active && child.startedAtMs > 0) {
+                long elapsed = System.currentTimeMillis() - child.startedAtMs;
+                if (elapsed > 0 && elapsed < 3600000L) meta.append(meta.length() > 0 ? " · " : "").append("已运行 ").append(SessionInsight.duration(elapsed));
+            }
+        }
+        ArrayList<String[]> rows = new ArrayList<String[]>();
+        String previous = "";
+        for (int i = 0; i < group.size(); i++) {
+            if (rows.size() >= 40) {
+                rows.add(new String[] {"… 还有 " + (group.size() - i) + " 条过程", "在右上角会话详情中查看完整记录。"});
+                break;
+            }
+            JSONObject item = group.get(i);
+            String label = RealtimeEvents.label(item, false);
+            String detail = ConversationContent.item(item).trim();
+            if (detail.isEmpty()) detail = RealtimeEvents.preview(item);
+            String signature = label + "|" + detail;
+            if (signature.equals(previous)) continue;
+            previous = signature;
+            rows.add(new String[] {label, detail});
+        }
+        if (rows.isEmpty()) rows.add(new String[] {"子任务本轮没有可展示的过程", ""});
+        String preview = child != null && !child.preview.isEmpty() ? child.preview : "";
+        if (preview.isEmpty()) {
+            for (int i = rows.size() - 1; i >= 0 && preview.isEmpty(); i--) preview = rows.get(i)[1];
+        }
+        preview = SessionInsight.oneLine(preview, 220);
+        final String expandId = "child:" + ConversationContent.string(turn, "id", "") + ":" + key;
+        boolean open = this.expandedActivities.contains(expandId);
+        Runnable toggle = () -> {
+            if (!this.expandedActivities.remove(expandId)) this.expandedActivities.add(expandId);
+        };
+        int color = status.equals("failed") ? Ui.danger : (status.equals("interrupted") || status.equals("discarded")) ? Ui.warn
+            : active ? Ui.accent : Ui.mint;
+        this.transcript().subagent(host, title, meta.toString(), SessionInsight.statusLabel(status), color, active, preview, rows, open, toggle);
+        return active;
     }
 
     private ConversationRenderer transcript() {
@@ -2677,15 +3448,75 @@ implements NativeEngine.Observer {
         this.transcript().user(parent, text);
     }
 
+    /** 选图时记下系统给出的文件名，附件卡片才能显示得像文件而不是一串 UUID。 */
+    private static String displayName(Activity activity, Uri uri) {
+        try (android.database.Cursor cursor = activity.getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) return cursor.getString(index);
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     private void quoteMessage(String text) {
-        this.composer.setText(ConversationContent.quote(this.composer.getText().toString(), text));
-        this.composer.setSelection(this.composer.length());
-        this.composer.requestFocus();
-        ((InputMethodManager)this.getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(this.composer, InputMethodManager.SHOW_IMPLICIT);
-        this.persist();
+        this.quoteMessage(text, "");
+    }
+
+    /** 引用只进入引用条，不再把原文塞进输入框。 */
+    private void quoteMessage(String text, String sender) {
+        if (text == null || text.trim().isEmpty()) return;
+        JSONObject value = new JSONObject();
+        try {
+            value.put("text", text.trim()).put("sender", sender == null ? "" : sender);
+        } catch (JSONException ignored) {
+        }
+        this.quote = value;
+        this.refreshQuote();
+    }
+
+    /** 微信式引用条：左侧强调条 + 来源 + 两行截断 + 关闭。 */
+    private void refreshQuote() {
+        this.updateExecutionButton();
+        if (this.quoteBar == null) return;
+        this.quoteBar.removeAllViews();
+        if (this.quote == null) {
+            this.quoteBar.setVisibility(View.GONE);
+            return;
+        }
+        this.quoteBar.setVisibility(View.VISIBLE);
+        String sender = this.quote.optString("sender", "");
+        String body = this.quote.optString("text", "");
+        LinearLayout row = Ui.row((Context)this);
+        row.setGravity(16);
+        View bar = new View((Context)this);
+        bar.setBackground(Ui.round(Ui.accent, Ui.dp((Context)this, 2)));
+        row.addView((View)bar, new LinearLayout.LayoutParams(Ui.dp((Context)this, 3), -1));
+        LinearLayout labels = Ui.col((Context)this);
+        LinearLayout.LayoutParams labelsSpace = new LinearLayout.LayoutParams(0, -2, 1.0f);
+        labelsSpace.leftMargin = Ui.dp((Context)this, 10);
+        row.addView((View)labels, labelsSpace);
+        labels.addView(Ui.text((Context)this, sender.isEmpty() ? "\u5f15\u7528" : "\u5f15\u7528 \u00b7 " + sender, 10.5f, Ui.accent, Ui.medium((Context)this)));
+        TextView bodyView = Ui.text((Context)this, body, 12.5f, Ui.muted, null);
+        bodyView.setMaxLines(2);
+        bodyView.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams bodySpace = new LinearLayout.LayoutParams(-1, -2);
+        bodySpace.topMargin = Ui.dp((Context)this, 2);
+        labels.addView((View)bodyView, bodySpace);
+        TextView close = Ui.text((Context)this, "\u00d7", 16.0f, Ui.faint, null);
+        Ui.pad(close, 10, 0, 8, 0);
+        Ui.touchable(close);
+        close.setOnClickListener(v -> {
+            this.quote = null;
+            this.refreshQuote();
+        });
+        row.addView((View)close);
+        this.quoteBar.addView((View)row, Ui.fill());
     }
 
     private void editMessage(String sourceThread, JSONObject turn, JSONObject item) {
+        if(this.collaboration.working()){NativeUi.toast(this,"请先等待或停止当前协作，再编辑历史消息");return;}
         if (!sourceThread.equals(this.threadId)) return;
         if (this.submitting || !this.turnId.isEmpty()) {
             NativeUi.toast(this, "请先等待或停止当前任务，再编辑消息");
@@ -2748,7 +3579,7 @@ implements NativeEngine.Observer {
     }
 
     private void errorLine(LinearLayout parent, String error) {
-        String text = error;
+        String text = ErrorMessage.friendly(error);
         String act = "";
         if (error.contains("terminated")) {
             text = "\u672c\u8f6e\u8fd0\u884c\u88ab\u4e2d\u65ad\uff1aAgent \u8fdb\u7a0b\u6216\u8fde\u63a5\u610f\u5916\u7ed3\u675f\u3002\u5e38\u89c1\u539f\u56e0\u662f\u8fd0\u884c\u73af\u5883\u91cd\u542f\u3001\u5185\u5b58\u7d27\u5f20\u6216\u670d\u52a1\u88ab\u7cfb\u7edf\u56de\u6536\u3002";
@@ -2855,14 +3686,16 @@ implements NativeEngine.Observer {
             LinearLayout.LayoutParams cardSpace = new LinearLayout.LayoutParams(-1, -2);
             cardSpace.bottomMargin = Ui.dp((Context)this, 8);
             card.setLayoutParams(cardSpace);
-            card.addView(Ui.text((Context)this, seed[0], 14.0f, Ui.text, Ui.medium((Context)this)));
+            TextView ideaTitle = Ui.text((Context)this, seed[0], 14.0f, Ui.text, Ui.medium((Context)this));
+            ideaTitle.setPadding(Ui.dp((Context)this, 2), Ui.dp((Context)this, 1), Ui.dp((Context)this, 2), Ui.dp((Context)this, 1));
+            card.addView(ideaTitle, Ui.fill());
             TextView note = Ui.text((Context)this, seed[1], 12.0f, Ui.faint, null);
             LinearLayout.LayoutParams noteSpace = new LinearLayout.LayoutParams(-1, -2);
             noteSpace.topMargin = Ui.dp((Context)this, 3);
             card.addView((View)note, noteSpace);
-            Ui.touchable(card);
-            Ui.ripple(card, Ui.text);
-            card.setOnClickListener(v -> {
+            Ui.touchable(ideaTitle);
+            Ui.rippleRounded(ideaTitle, 8, Ui.text);
+            ideaTitle.setOnClickListener(v -> {
                 this.composer.setText(seed[0] + "\uff1a");
                 this.composer.setSelection(this.composer.getText().length());
                 this.composer.requestFocus();
@@ -2885,6 +3718,28 @@ implements NativeEngine.Observer {
             this.scrollBottom.setAlpha(0.0f);
             this.scrollBottom.setTranslationY(Ui.dp((Context)this, 8));
             this.scrollBottom.animate().alpha(1.0f).translationY(0.0f).setDuration(160L).start();
+        }
+    }
+
+    /** 回到最新消息按钮：抬到输入卡片上方，否则会被 composer 盖住看不见。 */
+    private void placeScrollButton() {
+        if (this.scrollBottom == null || this.composerHost == null) {
+            return;
+        }
+        ViewGroup.LayoutParams raw = this.scrollBottom.getLayoutParams();
+        if (!(raw instanceof FrameLayout.LayoutParams)) {
+            return;
+        }
+        int strip = this.statusStrip != null && this.statusStrip.getVisibility() == View.VISIBLE ? this.statusStrip.getHeight() : 0;
+        FrameLayout.LayoutParams space = (FrameLayout.LayoutParams)raw;
+        int bottom = this.composerHost.getHeight() + strip + Ui.dp((Context)this, 10);
+        if (space.bottomMargin != bottom) {
+            space.bottomMargin = bottom;
+            this.scrollBottom.setLayoutParams(space);
+        }
+        ViewGroup parent = (ViewGroup)this.scrollBottom.getParent();
+        if (parent != null && parent.getChildCount() > 0 && parent.getChildAt(parent.getChildCount() - 1) != this.scrollBottom) {
+            this.scrollBottom.bringToFront();
         }
     }
 
@@ -2928,6 +3783,13 @@ implements NativeEngine.Observer {
     }
 
     private void updateStatusLine() {
+        String execution=this.executionState();
+        if(execution.equals("stopping")||execution.equals("pausing")||execution.equals("interrupted")||execution.equals("paused")||execution.equals("resuming")){
+            String message=execution.equals("stopping")||execution.equals("pausing")?"正在停止当前执行…":execution.equals("resuming")?"等待继续原任务…":
+                    this.autoQueuePending()?"当前执行已停止 · 待发消息自动接力":this.pausedQueueWaiting()?"当前执行已停止 · 待发队列已暂停":"当前执行已停止 · 输入为空时点击执行可继续";
+            this.status(message,this.autoQueuePending()?Ui.accent:Ui.warn,true);return;
+        }
+        if(this.turnId.isEmpty()&&this.collaboration!=null&&this.collaboration.working()){this.status(this.collaboration.progress(),Ui.accent,true);return;}
         if (!this.turnId.isEmpty()) {
             long elapsed = this.turnStartedAt > 0L ? SystemClock.elapsedRealtime() - this.turnStartedAt : 0L;
             JSONObject turn = this.currentTurn(this.turnId);
@@ -3049,6 +3911,80 @@ implements NativeEngine.Observer {
         if (tokens == null) return null;
         JSONObject total = tokens.optJSONObject("total");
         return NativeHomeActivity.totalTokens(total) > 0 ? total : tokens.optJSONObject("last");
+    }
+
+    private JSONArray usageModels() {
+        return this.usage == null ? null : this.usage.optJSONArray("byModel");
+    }
+
+    private static String usageModelName(JSONObject group) {
+        String model = group.optString("model", "");
+        if (model.equals("null") || model.equalsIgnoreCase("undefined")) model = "";
+        String engine = group.optString("engine", "");
+        String label = model.isEmpty() ? "未记录模型" : NativeHomeActivity.shortModel(model);
+        return engine.isEmpty() ? label : NativeUi.engineName(engine) + " · " + label;
+    }
+
+    private static String usageModelState(JSONObject group) {
+        if (group.optBoolean("isActive")) return "执行中";
+        if (group.optBoolean("isCurrent")) return "当前";
+        if (group.optBoolean("isConfigured")) return "协作成员";
+        if (group.optBoolean("historical")) return "历史";
+        return "已使用";
+    }
+
+    /** Current and collaborator models only; retired models collapse into one summary line. */
+    private void modelUsageRows(LinearLayout box, boolean withContext) {
+        JSONArray models = this.usageModels();
+        if (models == null || models.length() == 0) return;
+        boolean collaboration = this.collaboration != null && this.collaboration.enabled();
+        if (!collaboration && this.thread != null && "collaboration".equals(this.thread.optString("executionMode"))) collaboration = true;
+        java.util.ArrayList<JSONObject> visible = new java.util.ArrayList<>();
+        int retired = 0, retiredTokens = 0;
+        for (int i = 0; i < models.length(); i++) {
+            JSONObject group = models.optJSONObject(i);
+            if (group == null) continue;
+            boolean current = group.optBoolean("isCurrent") || group.optBoolean("isActive");
+            boolean keep = collaboration ? (current || group.optBoolean("isConfigured")) : current;
+            if (keep) { visible.add(group); continue; }
+            retired++;
+            JSONObject usage = group.optJSONObject("tokenUsage");
+            if (usage != null) retiredTokens += NativeHomeActivity.totalTokens(usage.optJSONObject("total"));
+        }
+        if (visible.isEmpty() && retired == 0) return;
+        if (!visible.isEmpty()) {
+            box.addView(this.section(collaboration ? "模型" : "当前模型"));
+            for (int i = 0; i < visible.size(); i++) {
+                JSONObject group = visible.get(i);
+                JSONObject context = group.optJSONObject("context");
+                JSONObject usage = group.optJSONObject("tokenUsage");
+                int tokens = usage == null ? 0 : NativeHomeActivity.totalTokens(usage.optJSONObject("total"));
+                int used = context == null ? 0 : (int)context.optDouble("usedTokens", 0);
+                int window = context == null ? 0 : (int)context.optDouble("windowTokens", 0);
+                StringBuilder value = new StringBuilder();
+                if (tokens > 0) value.append(NativeHomeActivity.tokenText(tokens)).append(" tokens");
+                if (withContext && window > 0) {
+                    if (value.length() > 0) value.append(" · ");
+                    value.append(Math.min(100, Math.round(used * 100.0f / window))).append("% 上下文");
+                }
+                if (value.length() == 0) value.append("—");
+                String state = collaboration ? NativeHomeActivity.usageModelState(group)
+                        : (group.optBoolean("isActive") ? "执行中" : "当前");
+                int color = group.optBoolean("isActive") ? Ui.accent : Ui.text;
+                LinearLayout row = this.metricRow(NativeHomeActivity.usageModelName(group) + " · " + state, value.toString(), color);
+                TextView rowLabel = (TextView)row.getChildAt(0);
+                rowLabel.setSingleLine(true);
+                rowLabel.setEllipsize(TextUtils.TruncateAt.END);
+                box.addView(row, Ui.fill());
+            }
+        }
+        if (collaboration && retired > 0) {
+            LinearLayout row = this.metricRow("其他历史模型 · " + retired + " 个",
+                    retiredTokens > 0 ? NativeHomeActivity.tokenText(retiredTokens) + " tokens" : "—", Ui.faint);
+            TextView label = (TextView)row.getChildAt(0);
+            label.setSingleLine(true);
+            box.addView(row, Ui.fill());
+        }
     }
 
     private int turnStatsTokenSum() {
@@ -3186,19 +4122,6 @@ implements NativeEngine.Observer {
                 }
                 box.addView(Ui.text(this, timeline.toString().trim(), 11.5f, Ui.muted, null));
             }
-            TextView stop = Ui.text((Context)this, "停止任务", 12.5f, Ui.danger, Ui.medium((Context)this));
-            stop.setGravity(17);
-            stop.setBackground(Ui.round(Ui.cardHigh, Ui.dp((Context)this, 12)));
-            stop.setPadding(0, Ui.dp((Context)this, 11), 0, Ui.dp((Context)this, 11));
-            Ui.touchable(stop);
-            Ui.rippleRounded(stop, 12, Ui.danger);
-            stop.setOnClickListener(v -> {
-                this.dismissStatsPopup();
-                this.interrupt();
-            });
-            LinearLayout.LayoutParams stopSpace = new LinearLayout.LayoutParams(-1, -2);
-            stopSpace.topMargin = Ui.dp((Context)this, 10);
-            box.addView((View)stop, stopSpace);
         });
         this.taskProgressPopup = true;
     }
@@ -3385,6 +4308,7 @@ implements NativeEngine.Observer {
                 String source = NativeUi.engineName(this.usage.optString("contextEngine", this.engine));
                 box.addView(this.metricRow("上次上下文 · " + source, used > 0 ? tokenText(used) + " tokens" : "未上报"));
                 box.addView(this.metricRow("当前模型窗口", tokenText(window) + " tokens"));
+                this.modelUsageRows(box, true);
                 return;
             }
             if (used <= 0 || window <= 0) {
@@ -3393,6 +4317,7 @@ implements NativeEngine.Observer {
                 box.addView((View)this.metricRow("模型", this.model.isEmpty() ? "未选择" : NativeHomeActivity.shortModel(this.model)), Ui.fill());
                 box.addView((View)this.metricRow("压缩策略", this.contextPolicy()), Ui.fill());
                 box.addView(this.popupNote("窗口按当前模型计算：" + NativeHomeActivity.shortModel(this.model) + "。不同模型窗口不同。", Ui.faint));
+                this.modelUsageRows(box, true);
                 return;
             }
             LinearLayout hero = Ui.row((Context)this);
@@ -3421,6 +4346,7 @@ implements NativeEngine.Observer {
             box.addView(this.popupNote("窗口按当前模型计算：" + NativeHomeActivity.shortModel(this.model)
                     + " → " + NativeHomeActivity.tokenText(window) + "。" + this.contextPolicy()
                     + "；不同模型窗口不同，压缩由引擎按窗口触发。", Ui.faint));
+            this.modelUsageRows(box, true);
         });
     }
 
@@ -3462,11 +4388,7 @@ implements NativeEngine.Observer {
                 box.addView((View)this.metricRow("缓存写入", NativeHomeActivity.tokenText(write)), Ui.fill());
             }
             box.addView((View)this.metricRow(outputLabel, NativeHomeActivity.tokenText(output)), Ui.fill());
-            JSONObject agents = this.usage == null ? null : this.usage.optJSONObject("byEngine");
-            if (agents != null) for (String agent : ENGINE_IDS) {
-                JSONObject counters = agents.optJSONObject(agent);
-                if (counters != null) box.addView(this.metricRow(NativeUi.engineName(agent), tokenText(totalTokens(counters))));
-            }
+            this.modelUsageRows(box, false);
             if (this.usage != null && this.usage.optBoolean("totalsPartial"))
                 box.addView(this.popupNote("累计包含各 Agent 已上报的用量；仅上报上下文占用的记录不会当作计费用量累加。", Ui.muted));
             box.addView(this.popupNote(detailCumulative
@@ -3494,8 +4416,19 @@ implements NativeEngine.Observer {
             box.addView((View)this.metricRow("步数", steps > 0 ? steps + " 步" : "—"), first);
             box.addView((View)this.metricRow("累计 Token", tokens > 0 ? NativeHomeActivity.tokenText(tokens) : "—"), Ui.fill());
             box.addView((View)this.metricRow("总用时", millis > 0 ? NativeHomeActivity.elapsedText(millis) : "—"), Ui.fill());
-            box.addView((View)this.metricRow("模型", this.model.isEmpty() ? "未选择" : NativeHomeActivity.shortModel(this.model)), Ui.fill());
+            JSONArray allModels = this.usageModels();
+            int liveModels = 0, retiredModels = 0;
+            for (int i = 0; allModels != null && i < allModels.length(); i++) {
+                JSONObject g = allModels.optJSONObject(i);
+                if (g == null) continue;
+                if (g.optBoolean("isCurrent") || g.optBoolean("isConfigured") || g.optBoolean("isActive")) liveModels++;
+                else retiredModels++;
+            }
+            box.addView((View)this.metricRow("模型", this.collaboration != null && this.collaboration.enabled() && liveModels > 1
+                    ? "协作 · " + liveModels + " 个模型" + (retiredModels > 0 ? " · 历史 " + retiredModels : "")
+                    : this.model.isEmpty() ? "未选择" : NativeHomeActivity.shortModel(this.model)), Ui.fill());
             box.addView((View)this.metricRow("引擎", NativeUi.engineName(this.engine)), Ui.fill());
+            this.modelUsageRows(box, false);
             box.addView(this.popupNote("总用时按本机记录；模型用时、工具用时与 TTFT 需引擎上报。", Ui.faint));
         });
     }
@@ -3707,21 +4640,20 @@ implements NativeEngine.Observer {
             return;
         }
         String name = NativeHomeActivity.folder(this.cwd);
-        this.topSubtitle.setText(this.model.isEmpty() ? name : name + " \u00b7 " + NativeHomeActivity.shortModel(this.model));
+        this.topSubtitle.setText(this.collaboration!=null&&this.collaboration.enabled()?name+" · "+this.collaboration.members()+" 位协作成员":this.model.isEmpty()?name:name+" · "+NativeHomeActivity.shortModel(this.model));
     }
 
     private void updateControls() {
         if (this.sendButton == null) {
             return;
         }
-        boolean idle = NativeEngine.ready() && !this.loading && !this.submitting && this.turnId.isEmpty();
-        this.sendButton.setVisibility(this.turnId.isEmpty() ? View.VISIBLE : View.GONE);
-        this.stopButton.setVisibility(this.turnId.isEmpty() ? View.GONE : View.VISIBLE);
-        this.sendButton.setAlpha(idle ? 1.0f : 0.5f);
-        this.sendButton.setEnabled(this.turnId.isEmpty() && !this.submitting);
+        this.sendButton.setVisibility(View.VISIBLE);
+        this.updateExecutionButton();
+        if(this.messageQueue!=null)this.messageQueue.render();
         this.updateAttach();
+        this.updateCollaborationChrome();
         if (this.effortLabel != null) {
-            this.effortLabel.setText(this.effortName());
+            this.effortLabel.setText(this.collaboration!=null&&this.collaboration.enabled()?"成员配置":this.effortName());
         }
         this.updateUsageRow();
         if (this.turnId.isEmpty()) {
@@ -3731,15 +4663,298 @@ implements NativeEngine.Observer {
         }
     }
 
+    /** 把会话内的沙箱路径映射回宿主文件，缩略图才有东西可解码。 */
+    private File uploadFile(String path) {
+        if (path == null || path.isEmpty()) return null;
+        if (this.thumbRuntime == null) this.thumbRuntime = new RuntimeManager((Context)this, s -> {});
+        return new File(this.thumbRuntime.root, path.startsWith("/") ? path.substring(1) : path);
+    }
+
+    /** 后台解码并回填缩略图；标签不符说明格子已被复用，直接丢弃。 */
+    private void loadThumb(ImageView view, String path, int size) {
+        Bitmap cached = this.thumbCache.get(path);
+        if (cached != null && !cached.isRecycled()) {
+            view.setColorFilter(null);
+            view.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            view.setImageBitmap(cached);
+            return;
+        }
+        view.setTag(path);
+        File file = this.uploadFile(path);
+        if (file == null || !file.isFile()) return;
+        CompletableFuture.runAsync(() -> {
+            Bitmap bitmap = null;
+            try {
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+                if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    int sample = 1;
+                    while (bounds.outWidth / (sample * 2) >= size && bounds.outHeight / (sample * 2) >= size) sample *= 2;
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inSampleSize = sample;
+                    bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+                }
+            } catch (Exception ignored) {
+            }
+            final Bitmap loaded = bitmap;
+            if (loaded == null) return;
+            this.thumbCache.put(path, loaded);
+            this.runOnUiThread(() -> {
+                if (this.isDestroyed() || !path.equals(view.getTag())) return;
+                view.setColorFilter(null);
+                view.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                view.setImageBitmap(loaded);
+            });
+        });
+    }
+
+    /** 附件查看：全屏黑底、双指缩放、✕ 关闭。 */
+    private void previewAttachment(String path, String name) {
+        final File file = this.uploadFile(path);
+        if (file == null || !file.isFile()) {
+            NativeUi.toast((Activity)this, "\u56fe\u7247\u6587\u4ef6\u5df2\u4e0d\u5b58\u5728");
+            return;
+        }
+        final ViewGroup host = (ViewGroup)this.findViewById(android.R.id.content);
+        if (host == null) return;
+        final FrameLayout root = new FrameLayout((Context)this);
+        root.setBackgroundColor(Color.BLACK);
+        root.setClickable(true);
+        final ImageView photo = new ImageView((Context)this);
+        photo.setScaleType(ImageView.ScaleType.MATRIX);
+        photo.setContentDescription(name == null ? "" : name);
+        root.addView((View)photo, new FrameLayout.LayoutParams(-1, -1));
+        TextView close = Ui.text((Context)this, "\u00d7", 26.0f, Color.WHITE, null);
+        Ui.pad(close, Ui.dp((Context)this, 16), Ui.dp((Context)this, 8), Ui.dp((Context)this, 16), Ui.dp((Context)this, 8));
+        FrameLayout.LayoutParams closeSpace = new FrameLayout.LayoutParams(-2, -2);
+        closeSpace.gravity = Gravity.TOP | Gravity.END;
+        closeSpace.topMargin = Ui.dp((Context)this, 28);
+        closeSpace.rightMargin = Ui.dp((Context)this, 8);
+        root.addView((View)close, closeSpace);
+        Ui.touchable(close);
+        final Runnable dismiss = () -> host.removeView((View)root);
+        close.setOnClickListener(v -> dismiss.run());
+        root.setFocusableInTouchMode(true);
+        root.setOnKeyListener((v, code, event) -> {
+            if (code == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+                dismiss.run();
+                return true;
+            }
+            return false;
+        });
+        final Matrix matrix = new Matrix();
+        final ScaleGestureDetector detector = new ScaleGestureDetector((Context)this,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override public boolean onScale(ScaleGestureDetector source) {
+                        float factor = source.getScaleFactor();
+                        matrix.postScale(factor, factor, source.getFocusX(), source.getFocusY());
+                        photo.setImageMatrix(matrix);
+                        return true;
+                    }
+                });
+        photo.setOnTouchListener((v, event) -> {
+            detector.onTouchEvent(event);
+            return true;
+        });
+        host.addView((View)root, new FrameLayout.LayoutParams(-1, -1));
+        root.requestFocus();
+        root.post(() -> CompletableFuture.runAsync(() -> {
+            Bitmap bitmap = null;
+            try {
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+                if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    int sample = 1;
+                    final int target = Math.max(root.getWidth(), root.getHeight());
+                    while (bounds.outWidth / (sample * 2) >= target && bounds.outHeight / (sample * 2) >= target) sample *= 2;
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inSampleSize = sample;
+                    bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+                }
+            } catch (Exception ignored) {
+            }
+            final Bitmap loaded = bitmap;
+            this.runOnUiThread(() -> {
+                if (loaded == null) {
+                    NativeUi.toast((Activity)this, "\u65e0\u6cd5\u6253\u5f00\u8fd9\u5f20\u56fe\u7247");
+                    return;
+                }
+                photo.setImageBitmap(loaded);
+                float width = Math.max(1, root.getWidth());
+                float height = Math.max(1, root.getHeight());
+                float scale = Math.min(width / loaded.getWidth(), height / loaded.getHeight());
+                matrix.setScale(scale, scale);
+                matrix.postTranslate((width - loaded.getWidth() * scale) / 2f, (height - loaded.getHeight() * scale) / 2f);
+                photo.setImageMatrix(matrix);
+            });
+        }));
+    }
+
+    /** 双击引用条回到原文：在已渲染的消息里找第一处包含该段文字的文本并滚过去。 */
+    void revealQuoted(String text) {
+        String needle = text == null ? "" : text.trim();
+        while (needle.endsWith("\n")) needle = needle.substring(0, needle.length() - 1).trim();
+        if (needle.isEmpty() || this.messages == null) return;
+        TextView target = NativeHomeActivity.quoteSource(this.messages, needle);
+        if (target == null && needle.contains("\n")) {
+            target = NativeHomeActivity.quoteSource(this.messages, needle.substring(0, needle.indexOf('\n')).trim());
+        }
+        if (target == null) {
+            NativeUi.toast((Activity)this, "\u539f\u6d88\u606f\u4e0d\u5728\u5f53\u524d\u4f1a\u8bdd\u4e2d");
+            return;
+        }
+        int y = 0;
+        View node = (View)target;
+        while (node != null && node != this.messages) {
+            y += node.getTop();
+            ViewParent parent = node.getParent();
+            node = parent instanceof View ? (View) parent : null;
+        }
+        this.chat.smoothScrollTo(0, Math.max(0, y - Ui.dp((Context)this, 96)));
+        target.setAlpha(0.35f);
+        target.animate().alpha(1f).setDuration(420).start();
+    }
+
+    /** 跳过引用卡自身，否则双击会停在引用卡而不是原文。 */
+    private static TextView quoteSource(ViewGroup group, String needle) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if ("quote".equals(child.getTag())) continue;
+            if (child instanceof TextView) {
+                CharSequence value = ((TextView) child).getText();
+                if (value != null && value.toString().contains(needle)) return (TextView) child;
+            } else if (child instanceof ViewGroup) {
+                TextView found = NativeHomeActivity.quoteSource((ViewGroup) child, needle);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    /** 取消排队后把完整输入放回输入区，文字与图片附件都保留。 */
+    private void restoreQueuedInput(JSONArray input) {
+        if (this.composer == null) return;
+        boolean changed = this.composerContent();
+        JSONArray existing = new JSONArray();
+        for (JSONObject image : this.attachments) existing.put(image);
+        try {
+            input = ConversationContent.restoredInput(input, this.composer.getText().toString(), existing);
+        } catch (JSONException error) {
+            NativeUi.error(this, "恢复待发消息失败：" + error.getMessage());
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        ArrayList<JSONObject> images = new ArrayList<>();
+        for (int i = 0; input != null && i < input.length(); i++) {
+            JSONObject part = input.optJSONObject(i);
+            if (part == null) continue;
+            if ("text".equals(part.optString("type"))) {
+                if (text.length() > 0) text.append('\n');
+                text.append(part.optString("text"));
+            } else {
+                images.add(part);
+            }
+        }
+        this.composer.setText(text.toString());
+        this.composer.setSelection(text.length());
+        this.attachments.clear();
+        this.attachments.addAll(images);
+        this.refreshQuote();
+        this.updateAttach();
+        if (changed) NativeUi.toast(this, "编辑期间新增的草稿和附件已保留");
+        this.composer.requestFocus();
+        this.composer.post(() -> {
+            InputMethodManager keyboard = (InputMethodManager) this.getSystemService(INPUT_METHOD_SERVICE);
+            if (keyboard != null) keyboard.showSoftInput(this.composer, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
     private void updateAttach() {
+        this.updateExecutionButton();
         if (this.attachButton == null) {
             return;
         }
         this.attachButton.setContentDescription(this.attachments.isEmpty() ? "\u6dfb\u52a0\u56fe\u7247" : "\u5df2\u6dfb\u52a0 " + this.attachments.size() + " \u5f20\u56fe\u7247");
         ImageView icon = (ImageView)this.attachButton.getChildAt(0);
         icon.setColorFilter(this.attachments.isEmpty() ? Ui.muted : Ui.accent);
-        boolean images = this.modelSupportsImages(this.model);
+        boolean images = this.collaboration != null && this.collaboration.enabled() || this.modelSupportsImages(this.model);
         this.attachButton.setAlpha(images ? 1.0f : 0.35f);
+        if (this.attachStrip == null) {
+            return;
+        }
+        this.attachStrip.removeAllViews();
+        boolean empty = this.attachments.isEmpty();
+        if (this.attachScroll != null) this.attachScroll.setVisibility(empty ? View.GONE : View.VISIBLE);
+        this.attachStrip.setVisibility(empty ? View.GONE : View.VISIBLE);
+        if (empty) {
+            return;
+        }
+        for (int i = 0; i < this.attachments.size(); i++) {
+            JSONObject item = this.attachments.get(i);
+            String path = item.optString("path", "");
+            String name = item.optString("name", "");
+            if (name.isEmpty()) name = path.substring(path.lastIndexOf('/') + 1);
+            if (name.isEmpty()) name = "\u56fe\u7247";
+            LinearLayout chip = Ui.row((Context)this);
+            chip.setGravity(16);
+            chip.setBackground(Ui.round(Ui.cardHigh, Ui.dp((Context)this, 14)));
+            Ui.pad(chip, 6, 6, 6, 6);
+            LinearLayout thumb = Ui.col((Context)this);
+            thumb.setGravity(17);
+            thumb.setBackground(Ui.round(Ui.accentSoft, Ui.dp((Context)this, 10)));
+            ImageView glyph = new ImageView((Context)this);
+            glyph.setImageResource(R.drawable.ic_attachment);
+            glyph.setColorFilter(Ui.accent);
+            glyph.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            thumb.setClipToOutline(true);
+            thumb.addView((View)glyph, new LinearLayout.LayoutParams(-1, -1));
+            this.loadThumb(glyph, path, Ui.dp((Context)this, 40));
+            chip.addView((View)thumb, Ui.w(Ui.dp((Context)this, 30), Ui.dp((Context)this, 30)));
+            LinearLayout labels = Ui.col((Context)this);
+            LinearLayout.LayoutParams labelsSpace = new LinearLayout.LayoutParams(-2, -2);
+            labelsSpace.leftMargin = Ui.dp((Context)this, 8);
+            chip.addView((View)labels, labelsSpace);
+            TextView label = Ui.text((Context)this, name, 11.5f, Ui.text, Ui.medium((Context)this));
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            label.setMaxWidth(Ui.dp((Context)this, 132));
+            labels.addView((View)label);
+            TextView meta = Ui.text((Context)this, "\u56fe\u7247", 10.0f, Ui.faint, null);
+            labels.addView((View)meta);
+            TextView remove = Ui.text((Context)this, "\u00d7", 15.0f, Ui.faint, null);
+            Ui.pad(remove, 8, 0, 4, 0);
+            final int index = i;
+            final String title = name;
+            Ui.touchable(chip);
+            chip.setOnClickListener(v -> {
+                if (index >= this.attachments.size()) return;
+                this.previewAttachment(this.attachments.get(index).optString("path", ""), title);
+            });
+            Ui.touchable(remove);
+            remove.setOnClickListener(v -> {
+                if (index < this.attachments.size()) {
+                    this.attachments.remove(index);
+                    this.updateAttach();
+                }
+            });
+            chip.addView((View)remove);
+            LinearLayout.LayoutParams space = new LinearLayout.LayoutParams(-2, -2);
+            space.rightMargin = Ui.dp((Context)this, 8);
+            space.topMargin = Ui.dp((Context)this, 2);
+            this.attachStrip.addView((View)chip, space);
+        }
+        if (this.attachments.size() > 1) {
+            TextView clear = Ui.text((Context)this, "\u6e05\u7a7a", 11.5f, Ui.accent, Ui.medium((Context)this));
+            Ui.pad(clear, 6, 4, 6, 4);
+            Ui.touchable(clear);
+            clear.setOnClickListener(v -> {
+                this.attachments.clear();
+                this.updateAttach();
+            });
+            this.attachStrip.addView((View)clear);
+        }
     }
 
     private String effortName() {
@@ -3833,7 +5048,7 @@ implements NativeEngine.Observer {
 
     private void updateModelCapabilities() {
         if (this.attachButton != null) {
-            boolean images = this.modelSupportsImages(this.model);
+            boolean images = this.collaboration!=null&&this.collaboration.enabled()||this.modelSupportsImages(this.model);
             this.attachButton.setEnabled(images);
             this.attachButton.setAlpha(images ? 1.0f : 0.35f);
         }
@@ -3842,7 +5057,7 @@ implements NativeEngine.Observer {
             this.effortPill.setVisibility(this.supportedEfforts(this.model).isEmpty() ? View.GONE : View.VISIBLE);
     }
 
-    private static String shortModel(String value) {
+    static String shortModel(String value) {
         if (value == null || value.isEmpty()) {
             return "\u9009\u62e9\u6a21\u578b";
         }
@@ -3854,7 +5069,7 @@ implements NativeEngine.Observer {
         return trimmed.length() > 26 ? trimmed.substring(0, 26) + "\u2026" : trimmed;
     }
 
-    private static String join(String separator, String ... parts) {
+    static String join(String separator, String ... parts) {
         StringBuilder out = new StringBuilder();
         for (String part : parts) {
             if (part == null || part.isEmpty()) continue;
@@ -3912,12 +5127,9 @@ implements NativeEngine.Observer {
 
     private String turnFooter(String turnId) {
         JSONObject entry = this.turnStats().optJSONObject(turnId);
-        if (entry == null) {
-            return "";
-        }
         StringBuilder out = new StringBuilder();
-        long tokens = entry.optLong("tokens", 0L);
-        long millis = entry.optLong("ms", 0L);
+        long tokens = entry == null ? 0L : entry.optLong("tokens", 0L);
+        long millis = ConversationContent.durationMillis(this.currentTurn(turnId), entry == null ? 0L : entry.optLong("ms", 0L));
         if (tokens > 0L) {
             out.append(NativeHomeActivity.tokenText((int)tokens)).append(" tokens");
         }
@@ -3964,7 +5176,7 @@ implements NativeEngine.Observer {
         return ordered;
     }
 
-    private static String folder(String path) {
+    static String folder(String path) {
         if (path == null || path.isEmpty()) {
             return "projects";
         }
@@ -4005,7 +5217,7 @@ implements NativeEngine.Observer {
                     this.removeAsk(cardId);
                 } else {
                     JSONObject params = request.optJSONObject("params");
-                    this.answerApproval(approvalId, form.result(params == null ? this.engine : params.optString("engine", this.engine)), () -> this.removeAsk(cardId));
+                    this.answerApproval(approvalId, form.result(request.optString("engine",params == null ? this.engine : params.optString("engine", this.engine))), () -> this.removeAsk(cardId));
                 }
             }
         });
@@ -4023,7 +5235,11 @@ implements NativeEngine.Observer {
     private final HashSet<String> answeringApprovals = new HashSet<>();
     private void answerApproval(String approvalId, JSONObject result, Runnable success) {
         if (!this.answeringApprovals.add(approvalId)) return;
-        NativeEngine.call("approvals/respond", NativeUi.json("id", approvalId, "result", result), r -> {
+        JSONObject collaborationRequest=this.collaborationApprovals.get(approvalId);
+        JSONObject approvalParams=NativeUi.json("id",approvalId,"result",result);
+        if(collaborationRequest!=null)try{approvalParams.put("workflowId",collaborationRequest.optString("workflowId")).put("taskId",collaborationRequest.optString("taskId")).put("attemptId",collaborationRequest.optString("attemptId"));}catch(Exception ignored){}
+        NativeEngine.call(collaborationRequest==null?"approvals/respond":"native/collaboration/respond", approvalParams, r -> {
+            this.collaborationApprovals.remove(approvalId);
             this.answeringApprovals.remove(approvalId);
             this.approvals.remove(approvalId);
             success.run();
@@ -4034,7 +5250,8 @@ implements NativeEngine.Observer {
     }
 
     private void renderAsk(JSONObject ask) {
-        if (ask.has("execution")) return;
+        JSONObject execution=ask.optJSONObject("execution");
+        if(execution!=null&&!this.collaboration.owns(execution.optString("workflowId")))return;
         if (!ask.optBoolean("resolved") && ask.optJSONArray("questions") != null) {
             this.renderQuestion(null, ask.optString("id"), new Questionnaire(ask.optJSONArray("questions")), 0);
         } else this.renderAsk(ask, null);
@@ -4084,6 +5301,10 @@ implements NativeEngine.Observer {
         JSONArray initial = ask.optJSONArray("selected");
         if (initial != null) for (int i = 0; i < initial.length(); i++) selected.add(initial.optString(i));
         ArrayList<LinearLayout> rows = new ArrayList<LinearLayout>();
+        CappedScrollView optionScroll = new CappedScrollView(this);
+        LinearLayout optionList = Ui.col((Context)this);
+        optionScroll.addView((View)optionList, new FrameLayout.LayoutParams(-1, -2));
+        card.addView((View)optionScroll, new LinearLayout.LayoutParams(-1, -2));
         if (options != null) {
             for (int i = 0; i < options.length(); ++i) {
                 JSONObject option = options.optJSONObject(i);
@@ -4096,7 +5317,7 @@ implements NativeEngine.Observer {
                 row.setMinimumHeight(Ui.dp(this, 36));
                 LinearLayout.LayoutParams rowSpace = new LinearLayout.LayoutParams(-1, -2);
                 rowSpace.topMargin = Ui.dp((Context)this, 4);
-                card.addView((View)row, rowSpace);
+                optionList.addView((View)row, rowSpace);
                 ImageView mark = new ImageView((Context)this);
                 mark.setImageResource(R.drawable.ic_check);
                 mark.setColorFilter(Ui.faint);
@@ -4211,6 +5432,12 @@ implements NativeEngine.Observer {
                 done.accept(answer);
             }
         });
+        /* 只给选项区设上限：问题文字与底部按钮始终留在浮层里可见。 */
+        optionScroll.post(() -> {
+            if (card.getHeight() <= 0 || optionList.getChildCount() == 0) return;
+            int chrome = Math.max(0, card.getHeight() - optionScroll.getHeight());
+            optionScroll.setMaxHeight(Math.max(Ui.dp(this, 96), askOverlayMaxHeight() - chrome));
+        });
         LinearLayout.LayoutParams panelSpace = new LinearLayout.LayoutParams(-1, -2);
         if (this.askHost.getChildCount() > 0) panelSpace.topMargin = Ui.dp(this, 10);
         this.askHost.addView(panel, panelSpace);
@@ -4231,18 +5458,16 @@ implements NativeEngine.Observer {
         if (id2.isEmpty() || !this.approvals.add(id2)) {
             return;
         }
+        if(request.has("workflowId"))this.collaborationApprovals.put(id2,request);
         if ("item/tool/requestUserInput".equals(request.optString("method"))) {
             this.renderQuestionCard(request, id2);
             return;
         }
-        NativeApprovals.show((Activity)this, request, result -> NativeEngine.call("approvals/respond", NativeUi.json("id", id2, "result", result), r -> this.approvals.remove(id2), m -> {
-            this.approvals.remove(id2);
-            NativeUi.error((Activity)this, m);
-        }));
+        NativeApprovals.show((Activity)this, request, result -> this.answerApproval(id2,result,()->{}));
     }
 
     private void pickImage() {
-        if (!this.modelSupportsImages(this.model)) {
+        if (!(this.collaboration!=null&&this.collaboration.enabled())&&!this.modelSupportsImages(this.model)) {
             NativeUi.toast((Activity)this, "\u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165");
             return;
         }
@@ -4291,8 +5516,14 @@ implements NativeEngine.Observer {
                         ((OutputStream)out).write(buffer, 0, n);
                     }
                 }
+                String display = NativeHomeActivity.displayName(this, uri);
                 this.runOnUiThread(() -> {
-                    this.attachments.add(NativeUi.json("type", "localImage", "path", "/opt/aixs/native/.uploads/" + target.getName()));
+                    JSONObject attachment = NativeUi.json("type", "localImage", "path", "/opt/aixs/native/.uploads/" + target.getName());
+                    try {
+                        if (display != null && !display.isEmpty()) attachment.put("name", display);
+                    } catch (JSONException ignored) {
+                    }
+                    this.attachments.add(attachment);
                     this.updateAttach();
                     NativeUi.toast((Activity)this, "\u5df2\u6dfb\u52a0\u56fe\u7247");
                 });
@@ -4324,6 +5555,7 @@ implements NativeEngine.Observer {
         String next;
         super.onResume();
         NativeEngine.observers.addIfAbsent(this);
+        if(this.collaboration!=null)this.collaboration.resume();
         SharedPreferences prefs = this.getSharedPreferences("native-chat", 0);
         String draft = prefs.getString("draft-" + this.engine, "");
         if (this.composer != null && !draft.equals(this.composer.getText().toString())) {
@@ -4358,11 +5590,18 @@ implements NativeEngine.Observer {
         AskQueue.unlisten(this.askListener);
         this.dismissStatsPopup();
         this.handler.removeCallbacks(this.ticker);
+        this.collaborationRefresh.cancel();
+        this.queueRefresh.cancel();
+        this.repaint.cancel();
+        if(this.collaboration!=null)this.collaboration.pause();
         super.onDestroy();
     }
 
     protected void onPause() {
         this.persist();
+        if(this.collaboration!=null)this.collaboration.pause();
+        this.collaborationRefresh.cancel();
+        this.repaint.cancel();
         NativeEngine.observers.remove(this);
         super.onPause();
     }

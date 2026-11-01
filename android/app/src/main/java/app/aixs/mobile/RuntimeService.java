@@ -18,26 +18,38 @@ public final class RuntimeService extends Service {
   private Process backend;
   private DeviceMcpServer device;
   private PowerManager.WakeLock wake;
+  private PowerManager.WakeLock taskWake;
+  private final NativeEngine.Observer taskObserver = event -> updateTaskWake();
+  private void updateTaskWake() {
+    if (taskWake == null) return;
+    boolean working = NativeEngine.hasActiveWork();
+    // Periodic backend reconciliation releases locks after abrupt worker exits.
+    if (working) taskWake.acquire(60_000L);
+    else if (!working && taskWake.isHeld()) taskWake.release();
+  }
   private final Handler resourceHandler = new Handler(Looper.getMainLooper());
   private final Runnable resourceSample = new Runnable() {
     public void run() {
+      updateTaskWake();
       if (NativeEngine.ready()) {
         ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
         ((ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(memory);
         int thermal = Build.VERSION.SDK_INT >= 29 ? ((PowerManager) getSystemService(POWER_SERVICE)).getCurrentThermalStatus() : -1;
+        long checkpoint=NativeEngine.workCheckpoint();
         NativeEngine.call("native/collaboration/resources", NativeUi.json("available", memory.availMem,
             "lowMemory", memory.lowMemory, "thermal", thermal), result -> {
           org.json.JSONArray active=result.optJSONArray("activeAttemptIds");
+          NativeEngine.reconcileWork(result,checkpoint);updateTaskWake();
           if(active!=null) for(AskQueue.Pending pending:AskQueue.snapshot()) {
             JSONObject execution=pending.ask.optJSONObject("execution");if(execution==null)continue;
             String attempt=execution.optString("attemptId");boolean found=false;
             for(int i=0;i<active.length();i++) if(attempt.equals(active.optString(i)))found=true;
             if(!found)AskQueue.cancelExecution(attempt);
           }
-          Intent screen=new Intent(RuntimeService.this,CollaborationActivity.class);
+          Intent screen=new Intent(RuntimeService.this,NativeHomeActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP);
           Notification n=new Notification.Builder(RuntimeService.this,"runtime").setSmallIcon(R.drawable.ic_launcher)
               .setContentTitle("Ai-XS · 运行 "+result.optInt("running")+" / "+result.optInt("parallel",2))
-              .setContentText("待回答 "+AskQueue.snapshot().size()+" · 点击查看协作")
+              .setContentText("待回答 "+AskQueue.snapshot().size()+" · 点击回到会话")
               .setContentIntent(PendingIntent.getActivity(RuntimeService.this,7,screen,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE))
               .setOngoing(true).build();
           RuntimeService.this.startForeground(61,n);
@@ -72,6 +84,12 @@ public final class RuntimeService extends Service {
     startForeground(61, n);
     wake = ((PowerManager) getSystemService(POWER_SERVICE))
                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AiXS:RuntimeInstall");
+    wake.setReferenceCounted(false);
+    taskWake = ((PowerManager) getSystemService(POWER_SERVICE))
+               .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AiXS:AgentTask");
+    taskWake.setReferenceCounted(false);
+    NativeEngine.observers.addIfAbsent(taskObserver);
+    updateTaskWake();
     try {
       File state = new File(getFilesDir(), "runtime-operation.json");
       if (state.isFile() && RuntimeManager.json(state).optString("status").equals("running")) {
@@ -119,7 +137,7 @@ public final class RuntimeService extends Service {
       boolean restartAfterUpdate = false;
       String failure = null;
       try {
-        wake.acquire(30 * 60 * 1000L);
+        wake.acquire(45 * 60 * 1000L);
         boolean agentVersionOperation = "agent-update".equals(action) || "agent-select".equals(action) || "agent-remove".equals(action);
         if (agentVersionOperation) {
           if (backend != null && backend.isAlive()) {
@@ -360,6 +378,8 @@ public final class RuntimeService extends Service {
   }
   @Override
   public void onDestroy() {
+    NativeEngine.observers.remove(taskObserver);
+    if (taskWake != null && taskWake.isHeld()) taskWake.release();
     resourceHandler.removeCallbacks(resourceSample);
     if (device != null)
       device.close();

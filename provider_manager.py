@@ -19,6 +19,14 @@ DEFAULTS={
 }
 PROTOCOLS={'codex':['responses'],'claude':['anthropic-messages'],'deepseek':['anthropic-messages','openai-completions','responses']}
 USER_AGENT='Ai-XS/0.6.0'
+# Matches the installed DSH official model catalog. Other model IDs must
+# declare their capability explicitly; a tool's existence does not imply vision.
+DEEPSEEK_INPUTS={'deepseek-flash':['text','image'],'deepseek-v4-pro':['text']}
+
+
+def input_modalities(engine,model,profile):
+ entry=(profile.get('modelCapabilities') or {}).get(model) or {}
+ return copy.deepcopy(entry.get('inputModalities') or (DEEPSEEK_INPUTS.get(model,['text']) if engine=='deepseek' else ['text','image']))
 
 
 def private_write(path,value):
@@ -61,6 +69,7 @@ class ProviderManager:
    entry=self.document()['engines'][engine];profiles={}
    for mode,p in entry['profiles'].items():
     profiles[mode]={k:copy.deepcopy(p[k]) for k in ('name','baseUrl','protocol','models')}
+    profiles[mode]['modelCapabilities']=copy.deepcopy(p.get('modelCapabilities') or {})
     profiles[mode].update(keyConfigured=bool(p.get('key')),headersConfigured=bool(p.get('headers')))
    return {'engine':engine,'mode':entry['mode'],'profiles':profiles,'protocols':PROTOCOLS[engine]}
 
@@ -80,6 +89,16 @@ class ProviderManager:
   if not isinstance(value['name'],str) or not 0<len(value['name'].strip())<=100:raise ValueError('服务名称需为 1 到 100 个字符')
   if not isinstance(value['models'],list) or not 1<=len(value['models'])<=100 or not all(isinstance(m,str) and re.fullmatch(r'[^\s\x00-\x1f]{1,200}',m) for m in value['models']):raise ValueError('请填写模型 ID，每行一个，最多 100 个')
   value['models']=list(dict.fromkeys(value['models']))
+  if 'modelCapabilities' in params:
+   capabilities=params['modelCapabilities']
+   if not isinstance(capabilities,dict) or len(capabilities)>100:raise ValueError('模型能力配置格式不正确')
+   for model,entry in capabilities.items():
+    if model not in value['models'] or not isinstance(entry,dict):raise ValueError('模型能力必须对应已配置的模型 ID')
+    modalities=entry.get('inputModalities')
+    if not isinstance(modalities,list) or not modalities or len(modalities)>2 or any(m not in ('text','image') for m in modalities) or len(set(modalities))!=len(modalities):raise ValueError('模型输入能力只支持 text 和 image，且不能重复')
+   value['modelCapabilities']={model:{'inputModalities':copy.deepcopy(entry['inputModalities'])} for model,entry in capabilities.items()}
+  elif old.get('baseUrl','').rstrip('/')!=value['baseUrl'] or old.get('protocol')!=value['protocol']:value['modelCapabilities']={}
+  else:value['modelCapabilities']={m:v for m,v in (value.get('modelCapabilities') or {}).items() if m in value['models']}
   key=params.get('key','')
   if not isinstance(key,str) or len(key)>8192 or any(c in key for c in '\r\n\0'):raise ValueError('API Key 格式不正确')
   if key.strip():value['key']=key.strip()
@@ -113,7 +132,7 @@ class ProviderManager:
   env['ANTHROPIC_API_KEY' if self.document()['engines']['claude']['mode']=='official' else 'ANTHROPIC_AUTH_TOKEN']=claude.get('key','')
   env['ANTHROPIC_CUSTOM_HEADERS']='\n'.join(k+': '+v for k,v in claude.get('headers',{}).items())
   private_write(self.folder/'claude-provider.json',{'env':env,'model':claude['models'][0],'apiKeyHelper':'','forceLoginMethod':None})
-  ds=self.selected('deepseek');models=[{'id':m,'name':m,'contextWindow':1000000,'maxTokens':32768,'input':['text'],'reasoningEfforts':{'off':None,'low':'low','high':'high','max':'max'}} for m in ds['models']]
+  ds=self.selected('deepseek');models=[{'id':m,'name':m,'contextWindow':1000000,'maxTokens':32768,'input':input_modalities('deepseek',m,ds),'reasoningEfforts':{'off':None,'low':'low','high':'high','max':'max'}} for m in ds['models']]
   protocol={'responses':'openai-responses'}.get(ds['protocol'],ds['protocol'])
   provider={'displayName':ds['name'],'apiKeyEnv':'AI_XS_DEEPSEEK_API_KEY','api':protocol,'baseURL':ds['baseUrl'],'models':models,'headers':ds.get('headers',{}),'retryPolicy':{'mode':'normal','maxRetries':1}}
   if protocol=='openai-completions':provider['compat']={'thinkingFormat':'deepseek','supportsDeveloperRole':False,'maxTokensField':'max_tokens'}
@@ -123,7 +142,7 @@ class ProviderManager:
    {'id':'agent-default-model','config':{'provider':'ai-xs','model':ds['models'][0]}}]
   if self.document()['engines']['deepseek']['mode']=='official':
    patch=[{'id':'llm-pi-ai','config':{'providers':{}}},
-    {'id':'llm-deepseek','config':{'baseURL':ds['baseUrl'],'apiKeyEnv':'AI_XS_DEEPSEEK_API_KEY','maxTokens':32768,'models':[{'id':m,'name':m,'contextWindow':1000000,'maxTokens':32768,'inputModalities':['text']} for m in ds['models']]}},
+    {'id':'llm-deepseek','config':{'baseURL':ds['baseUrl'],'apiKeyEnv':'AI_XS_DEEPSEEK_API_KEY','maxTokens':32768,'models':[{'id':m,'name':m,'contextWindow':1000000,'maxTokens':32768,'inputModalities':input_modalities('deepseek',m,ds)} for m in ds['models']]}},
     {'id':'acp','config':{'provider':'deepseek-official','model':ds['models'][0]}},
     {'id':'agent-default-model','config':{'provider':'deepseek-official','model':ds['models'][0]}}]
   private_write(self.folder/'deepseek-provider.yml',patch)
@@ -154,7 +173,7 @@ class ProviderManager:
     if m not in ids:models.insert(0,copy.deepcopy(known.get(m)) or {'id':m,'model':m,'displayName':m,'inputModalities':['text','image'],'defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':x} for x in ['low','medium','high']]})
    for m in models:m['isDefault']=m['model']==p['models'][0]
    return {**native,'data':models}
-  return {'data':[{'id':m,'model':m,'displayName':m,'isDefault':i==0,'inputModalities':['text','image'],'defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':x} for x in ['low','medium','high','max']]} for i,m in enumerate(p['models'])]}
+  return {'data':[{'id':m,'model':m,'displayName':m,'isDefault':i==0,'inputModalities':input_modalities(engine,m,p),'defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':x} for x in ['low','medium','high','max']]} for i,m in enumerate(p['models'])]}
 
  def discover(self,engine,params):
   p=self.candidate(engine,params);base=p['baseUrl'];headers=dict(p.get('headers',{}))
@@ -179,7 +198,13 @@ class ProviderManager:
    ids=list(dict.fromkeys(m['id'] for m in values if isinstance(m,dict) and isinstance(m.get('id'),str)))
    if not ids:raise ValueError('接口未返回可识别的模型列表，请按服务商文档填写模型 ID')
    filtered=[m for m in ids if ('deepseek' in m.lower() if engine=='deepseek' else 'claude' in m.lower() if engine=='claude' else not any(x in m.lower() for x in ('claude','deepseek','gemini')))]
-   return {'models':filtered or ids,'total':len(ids),'detail':'已读取模型列表；此检查不会调用模型生成回复。'}
+   capabilities={}
+   for entry in values:
+    if not isinstance(entry,dict) or entry.get('id') not in (filtered or ids):continue
+    modalities=entry.get('inputModalities',entry.get('input_modalities',entry.get('input')))
+    if isinstance(modalities,list) and modalities and all(m in ('text','image') for m in modalities):
+     capabilities[entry['id']]={'inputModalities':list(dict.fromkeys(modalities))}
+   return {'models':filtered or ids,'modelCapabilities':capabilities,'total':len(ids),'detail':'已读取模型列表；此检查不会调用模型生成回复。'}
   except urllib.error.HTTPError as e:
    with e:
     body=e.read(8192).decode('utf-8','replace').lower()

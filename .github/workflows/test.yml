@@ -38,6 +38,9 @@ jobs:
         with:
           name: test-reports
           path: |
+            dist/*.validation.json
+            dist/*.verification.json
             android/app/build/reports/tests/
             android/app/build/reports/lint-results-release.html
+            android/app/build/reports/lint-results-release.xml
           if-no-files-found: ignore

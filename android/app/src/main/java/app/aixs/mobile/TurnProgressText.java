@@ -10,6 +10,8 @@ final class TurnProgressText {
     if ("starting".equals(phase)) return "启动中";
     if ("waiting".equals(phase)) return "等待接口";
     if ("receiving".equals(phase)) return "接收响应";
+    if ("planning".equals(phase)) return "规划任务";
+    if ("input".equals(phase)) return "等待回答";
     if ("thinking".equals(phase)) return "思考中";
     if ("responding".equals(phase)) return "输出中";
     if ("compacting".equals(phase)) return "压缩上下文";

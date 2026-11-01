@@ -33,7 +33,8 @@ class ExecutionProfiles:
         engine=value['engine'];entry=self.providers.document()['engines'][engine]
         mode=entry['mode'] if value.get('apiMode','current')=='current' else value['apiMode']
         url=urlsplit(entry['profiles'][mode].get('baseUrl',''))
-        return hashlib.sha256((url.scheme+'://'+url.netloc.lower()).encode()).hexdigest()[:16]
+        origin=url.scheme+'://'+url.netloc.lower() if url.netloc else engine+':'+mode
+        return hashlib.sha256(origin.encode()).hexdigest()[:16]
 
     def resolve(self, value, folder):
         p=participant(value);engine=p['engine']

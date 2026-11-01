@@ -13,6 +13,7 @@ import agent_core as core
 from shared_conversations import SharedConversations
 from extension_manager import ExtensionManager
 from collaboration_service import CollaborationService
+from native_history import remove_owned
 
 
 class NativeHost:
@@ -63,7 +64,24 @@ class NativeHost:
         self.maintenance=False
         self.maintenance_lock=threading.RLock()
         self.starting_tasks=0
-        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':'0.9.0-alpha'})
+        version=json.loads(Path(__file__).with_name('version.json').read_text())
+        self.write({'ready':True,'name':'Ai-XS','transport':'private-stdio','version':version['versionName']})
+        threading.Thread(target=self.purge_deleted,name='aixs-purge-deleted',daemon=True).start()
+
+    def purge_deleted(self):
+        try:
+            result=self.collaboration.purge_deleted(self.delete_conversation_data)
+        except Exception as error:
+            print('清理已删除会话失败：'+str(error),file=sys.stderr,flush=True)
+            return
+        if result.get('purged') or result.get('failed'):
+            print('已删除会话清理：完成 %s 个，待重试 %s 个'%(result.get('purged',0),result.get('failed',0)),
+                file=sys.stderr,flush=True)
+            self.write({'event':{'type':'native/cleanup','purged':result.get('purged',0),
+                'failed':result.get('failed',0)}})
+        for item in result.get('errors',[]):
+            print('清理失败 %s：%s'%(item.get('threadId',''),item.get('error','')),file=sys.stderr,flush=True)
+
 
     def dispatch(self, request, slot=None):
         ident=request.get('id')
@@ -87,6 +105,10 @@ class NativeHost:
                     if self.maintenance and method.rsplit('/',1)[-1] not in ('read','list','resources','pause','cancel','stop','respond'):
                         raise ValueError('正在维护 Agent，请稍后重试')
                     result=self.collaboration.handle(method.removeprefix('native/collaboration/'),params)
+                    if method=='native/collaboration/resources':
+                        with self.chats.lock:
+                            result['activeTurnKeys']=[d['id']+':'+t['id'] for key,row in list(self.chats.index.items()) if not row.get('deleted')
+                                for d in [self.chats._load(key)] for t in d['turns'] if t.get('status')=='inProgress' and not t.get('queued')]
             elif method=='native/agents/status':
                 result=core.ENGINES.status(probe=False)
             elif method=='native/agents/control':
@@ -104,9 +126,18 @@ class NativeHost:
                 else:raise ValueError('不支持的扩展操作')
             elif method.startswith('native/chat/'):
                 action=method.removeprefix('native/chat/')
-                if action.startswith('permissions/'):
+                if action.startswith('queue/'):
+                    with self.maintenance_lock:
+                        if self.maintenance and action not in ('queue/list','queue/delete','queue/pause'):raise ValueError('正在维护 Agent，请稍后重试')
+                        result=self.collaboration.queue.handle(action.removeprefix('queue/'),params)
+                elif action.startswith('execution/'):
+                    with self.maintenance_lock:
+                        if self.maintenance and action!='execution/read':raise ValueError('正在维护 Agent，请稍后重试')
+                        result=self.collaboration.execution.handle(action.removeprefix('execution/'),params)
+                elif action.startswith('permissions/'):
                     result=self.chats.permissions(action,params) if params.get('threadId') else core.api_route('native/'+action,params)
                 elif action=='usage/read':result=self.chats.usage(params)
+                elif action=='thread/delete':result=self.collaboration.delete_conversation(params,self.delete_conversation_data)
                 elif action in ('turn/start','turn/edit'):result=self.collaboration.normal_submit(action,params)
                 elif action=='turn/interrupt' and self.collaboration.normal_cancel(params):result={}
                 else:result=self.chats.handle(action,params)
@@ -187,10 +218,36 @@ class NativeHost:
             docs=[d for d in docs if any(t.get('status')=='inProgress' and not t.get('queued') for t in d['turns']) and d['id'] not in getattr(getattr(self,'collaboration',None),'normal_active',set())]
             return {'count':len(docs),'projects':[d['cwd'] for d in docs]}
 
+    def delete_conversation_data(self, doc):
+        def images(value):
+            result=set()
+            if isinstance(value,list):
+                for item in value:result.update(images(item))
+            elif isinstance(value,dict):
+                if value.get('type') in ('localImage','image'):
+                    path=value.get('path') or value.get('url')
+                    if isinstance(path,str) and Path(path).is_absolute():result.add(path)
+                for item in value.values():
+                    if isinstance(item,(dict,list)):result.update(images(item))
+            return result
+        with self.chats.lock:
+            others=[self.chats._load(key) for key,row in list(self.chats.index.items()) if key!=doc['id'] and not row.get('deleted')]
+            retained=set().union(*(images(d) for d in others))
+        for name in images(doc)-retained:
+            path=Path(name)
+            if path.parent.resolve()==core.UPLOADS.resolve():remove_owned(core.UPLOADS,path)
+        ids={doc['id'],*(c['threadId'] for c in doc['children'])}
+        for native_id in ids:core.APP.codex_children.forget(native_id)
+        with core.APP.event_condition:
+            keep=[e for e in core.APP.events if e.get('params',{}).get('threadId') not in ids]
+            core.APP.events.clear();core.APP.events.extend(keep)
+
     def read_usage(self, params):
         if core.engine_for(params)=='codex':
             record=self.codex_record(str(params.get('threadId') or ''))
-            return core.read_thread_usage(params.get('threadId'),{'path':record.get('rollout_path')} if record else {})
+            value=core.read_thread_usage(params.get('threadId'),{'path':record.get('rollout_path')} if record else {})
+            if value.get('tokenUsage') is not None:value['tokenUsage']=core.APP.codex_children.merge_usage(params.get('threadId'),value['tokenUsage'])
+            return value
         return core.api_route('usage/read',params)
 
     def list_threads(self, params):

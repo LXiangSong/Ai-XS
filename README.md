@@ -1,52 +1,50 @@
 # Ai-XS
 
-Ai-XS 是独立的 Android 原生 Agent 工作空间，与 AI-Web 分开维护。
-UI 工程使用 Gradle、Android Gradle Plugin、Google Material Components 和 Material 3。
-主界面提供 Agent 切换、会话、项目、API/MCP 设置、环境管理和手机工具。
+Ai-XS 是 Android 原生 Agent 工作空间，在同一条会话中使用 Codex、Claude Code 和 DeepSeek Harness，管理项目、工具、API 与协作任务。界面使用 Material 3，通过私有进程管道连接 Agent，不依赖 AI-Web 或网页工作台。
 
-初始化仅在 **设置 → 运行环境**；未初始化时提示“去设置 / 稍后”，没有自动初始化入口。
-Codex、Claude Code、DeepSeek 共用一套私有 ARM64 Linux 环境。
-新安装分别配置官方 API 或第三方 API，不继承其他 App 的账户。
+当前版本：**0.9.11-alpha**，Android 8.0 及以上，ARM64。仍处于测试阶段，验证范围见[发布核验](android/RELEASE_VERIFICATION.md)。
 
-构建及初始化说明见 [Android 文档](android/README.md) 与 [安装指南](android/INSTALLATION.md)。
-当前是 `0.9.0-alpha`：Codex、Claude Code、DeepSeek 可接手同一条 App 会话，保留项目、历史、工具结果与草稿。
-用户消息支持复制、引用、编辑并重发，编辑前的完整后续保留为独立分支；所有 Agent 回复均支持复制和引用。
-跨 Agent 用量按私有会话快照持久汇总，切换不会清空历史统计；实际上下文在交接后更新。
-模型思考选项按能力目录显示，支持的 Codex 模型可选择 MAX。
-设置中的扩展库支持从 GitHub、本地 ZIP / SKILL.md 导入 Skills 和插件，也可让 Agent 调用扩展工具完成安装；每项可分配给一个或多个 Agent，不支持的原生插件组件会显示具体原因。
-权限弹窗显示工具、目标路径、命令、工作目录和申请说明，保留编辑参数与协议特有详情；长内容可滚动查看、选择复制。
-设置 → Agent 管理 → 检查全部 Agent 更新可检查三个 Agent 的官方最新版本并更新；有运行中的任务时会拒绝更新，空闲服务会在更新结束后恢复。
-Agent 管理页的「版本管理 / 回退」列出已安装版本，更新后保留旧版本，可切换、回退或手动删除旧版本；当前使用的版本禁止删除。
-设置 → 关于 Ai-XS 展示项目、反馈与发布记录，并从 [GitHub Releases](https://github.com/LXiangSong/Ai-XS/releases) 检查和下载应用更新。安装前核对包名、签名与递增的版本号，随后交由 Android 系统安装。
-GitHub 发布 APK 的要求见 [更新发布说明](android/UPDATES.md)。
-界面使用统一的色板与字阶、分段式首页（顶栏 / 对话流 / 输入卡）、
-自定义抽屉与全高会话面板，对话采用右侧用户气泡、Markdown 正文、代码卡片与可折叠工具行。
-构建使用 `assembleRelease`、`lintRelease` 与 APK 签名校验。
-跨 Agent 会话、上下文交接和权限确认通过私有进程协议集成测试；第三方 API 与模型的具体能力以实际接口为准。
+[下载安装](https://github.com/LXiangSong/Ai-XS/releases) · [安装与初始化](android/INSTALLATION.md) · [版本记录](CHANGELOG.md) · [文档索引](docs/README.md)
 
-### 运行进度与诊断
+## 安装和开始使用
 
-安装、初始化、环境检查、Agent 更新和版本切换在操作页面显示进度与结果，不会自动打开运行日志。失败后可点击“查看运行日志”，直接筛选这次操作的 Debug 记录。应用更新的检查与下载结果也保留在“关于”页面。
+1. 从本仓库 Releases 下载 `Ai-XS-<version>.apk`。升级保留 App 私有环境、项目、API 配置和历史，覆盖安装必须使用同一签名。
+2. 打开 **设置 → 运行环境 → 初始化环境**。初始化仅由用户在这里启动，不在首页自动执行。
+3. 在 **设置 → Agent 管理** 按需安装 Agent，在 **设置 → API 服务配置** 填写对应 API、协议、模型和密钥。
+4. 选择项目并发送任务。切换协作模式前配置至少两位成员，可使用相同 Agent 的不同模型。
 
-设置 → 运行日志：普通日志记录阶段、结果与提醒；Debug 记录子进程输出、退出码、耗时、Agent 通信诊断、浏览器错误与应用异常堆栈。可按级别、来源、操作编号与关键词筛选，暂停刷新、复制当前内容，或导出包含设备/版本信息与轮转日志的脱敏诊断报告。旧版本的输出保留在“历史日志”。查看历史时不会自动滚动，点击“跳到最新”才恢复跟随。
+三个 Agent 共用一套私有 ARM64 Linux、Node、Python 和 Git。APK 内置基础系统和 PRoot；Python、Git、TLS、Node 与 Agent 在初始化或安装时下载，Ubuntu 依赖使用中科大／清华镜像，Node／npm 使用国内镜像。新安装不读取其他 App 或 Termux 的账户。
 
-Agent 的 `app_logs` 工具支持 `runtime`（普通）、`debug`、`browser`、`legacy` 与 `logcat`（Ai-XS 自身进程）来源；普通和 Debug 日志还可通过 `level`、`origin`、`operation`、`query` 精确筛选。普通日志和 Debug 分别保留当前文件与上一份轮转文件，每份上限约 512 KB / 1 MB。
+## 会话与执行
 
-### Agent 管理
+- 独立与协作模式共用会话、项目、输入框、附件、历史和用量。切换 Agent 会交接历史，已执行操作不回滚。
+- 正文、可用的思考摘要、命令和工具过程按实际协议流式显示；服务端没有提供的内容不模拟生成。
+- 输入有文字、引用或附件时显示发送；运行中发送进入待发队列。队列支持编辑、删除及显式引入当前任务。
+- 运行中输入为空时显示停止，停止会中断当前执行。没有可自动接力的普通待发项时，空输入可继续原任务；队列明确暂停或队首失败／待核对时不会擅自派发。
+- 任务完成及队列接力刷新保留当前页面、协作流式内容与已加载历史，不因缓存失效返回新会话页。详见[执行按钮与队列](android/MESSAGE_QUEUE.md)。
 
-设置 → Agent 管理集中管理安装、更新、版本切换与启停。可全部启动/停止，或分别启动/停止 Codex、Claude Code、DeepSeek。停止前提示中断任务，状态跨服务重启保留；启动验证本地程序后置为空闲就绪，实际任务仍按需启动进程，避免三个 Agent 同时占用内存。启停进度与结果保留在当前页，失败时可打开对应操作日志。
+会话详情汇总文件改动、子代理和工具来源；用户消息支持编辑分支，回复支持复制和引用。用量按实际执行来源保存，未上报的上下文或计费数据标为未知。
 
-### 协作模式
+## 协作、环境与工具
 
-从左侧菜单 **协作** 或会话顶部 **独立 ▾** 进入。添加参与者、模型、职责和子任务，填写依赖与交付要求后保存，点击“确认计划并开始”。同一个 Agent 可添加多个参与者并使用不同模型，Codex、Claude Code、DeepSeek 也可混用；三个 Agent 共用一套环境，各次执行有独立配置目录和工作区。
+协作成员可分别选择 Agent、模型、API 来源、职责、思考强度和权限。已提供并行／开发／研究模板、审核依赖、结构化交接、有限返工、执行预算、资源调度、恢复核对、成果预览与人工合入。Git 项目使用 worktree，非 Git 项目使用有界快照；工作区隔离不限制任意 shell 或外部 MCP 行为。
 
-默认全局最多 2 个执行、重任务 1 个；设置 → 协作与资源管理可调整全局和同 API 网关上限。内存不足、严重发热或资源信息过期时暂停新派发。手机和开发浏览器任务使用独占资源，普通会话与同项目协作互斥，等待名额时在原会话排队。
+Agent 管理支持安装、更新、启停和版本回退；运行中拒绝更新程序。Skills／插件库支持 GitHub、本地 ZIP 或 SKILL.md，并显示兼容性；MCP、手机无障碍与开发浏览器工具按配置使用。环境检查／修复按阶段记录镜像、命令、退出码与最后输出，日志可筛选并导出脱敏诊断。
 
-支持负责人生成可编辑计划（检查后手动开始）、暂停派发、取消、停止单个任务、重试及中途更换 Agent / 模型。每次尝试保留结果、用量和独立诊断；权限问题按执行实例回答。执行后人工验收，结果可接收到原会话；返回独立模式时可选择后台继续或中断协作。服务重启后暂停，不自动重放任务。
+[协作使用与边界](android/COLLABORATION.md) · [运行环境与构建](android/README.md) · [第三方组件](THIRD_PARTY_NOTICES.md)
 
-Git 项目须选择仓库根目录并先提交改动，任务运行于独立 worktree，补丁须手动检查和合入。非 Git 项目使用不超过 200 MiB 的快照，成果在任务工作区内查看。隔离目录是文件工作流约束，不是限制所有 shell / 外部 MCP 行为的安全沙箱。
+## 开发与验证
 
-这是协作首版。具名 API 来源库、配置预设库、自动返工、预算、429 退避、工作区清理管理及复杂补丁冲突合并尚未实现；不支持的模型或思考强度会报错，不会默默替换模型。完整方案与实际实现范围分别见[设计规格](design/COLLABORATION.md)和[协作使用与边界](android/COLLABORATION.md)。
+需要 Python 3.12+、JDK 21、Android SDK 35／Build Tools 35.0.0。仓库包含固定的 ARM64 基础系统与原生库，普通构建无需重新生成它们。Gradle Wrapper、AGP 和依赖版本固定在工程中。
 
-版本变更见 [CHANGELOG.md](CHANGELOG.md)。
-本次检查范围与已知限制见 [发布核验](android/RELEASE_VERIFICATION.md)。
+```sh
+python android/tools/check_project.py
+python android/tools/test_all.py          # Python、Java、Lint、签名 Release 构建
+python android/tools/verify_release.py --production
+```
+
+首次构建需联网下载 Gradle／Maven 依赖，缓存完整后可加 `--offline`。本地构建需自行准备签名，步骤见[开发指南](docs/DEVELOPMENT.md)；GitHub CI 使用临时测试证书，其 APK 不用于覆盖发布。
+
+版本统一维护在 `android/version.properties`。APK、SHA-256 和核验报告输出到 `dist/`，开发日志、签名材料和生成资产不提交。
+
+[项目结构](PROJECT_STRUCTURE.md) · [开发指南](docs/DEVELOPMENT.md) · [发布流程](android/UPDATES.md)

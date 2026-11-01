@@ -155,14 +155,14 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     NativeUi.tile(this, body, R.drawable.ic_key, "API 服务配置", "官方 API / 第三方 API，三个 Agent 独立配置",
         () -> startActivity(new Intent(this, NativeToolsActivity.class).putExtra("page", "api")));
     NativeUi.tile(this, body, R.drawable.ic_cloud, "运行环境",
-        manager.complete() ? "已就绪 · 可检查与修复" : manager.initialized() ? "基础系统已就绪 · 待补装组件" : "未初始化",
+        manager.complete() ? "已就绪 · 可检查与修复" : manager.initialized() ? "基础系统已解压 · 待检查／补装" : "未初始化",
         () -> show("environment"));
     NativeUi.tile(this, body, R.drawable.ic_spark, "Agent 管理", installedCount() + " / 3 已安装 · 启停、更新与版本管理",
         () -> show("agents"));
 
     NativeUi.section(this, body, "能力");
     NativeUi.tile(this, body, R.drawable.ic_spark, "协作与资源管理", "并行上限、重任务与资源保护",
-        () -> startActivity(new Intent(this, CollaborationActivity.class).putExtra("page", "settings")));
+        () -> ConversationCollaboration.resources(this));
     NativeUi.tile(this, body, R.drawable.ic_device, "手机与开发工具",
         PhoneAccessibilityService.active != null ? "无障碍已开启 · 页面调试可配置" : "无障碍未开启 · 页面调试可配置",
         () -> show("device"));
@@ -189,8 +189,9 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
     NativeUi.section(this, body, "环境状态");
     LinearLayout states = Ui.group(body);
     infoRow(states, R.drawable.ic_cloud, "Linux 基础系统",
-        ready ? "已初始化 · ARM64" : manager.initialized() ? "已就绪 · 待补装组件" : "未初始化");
-    infoRow(states, R.drawable.ic_terminal, "共享组件", ready ? "Python · Node · Git 已就绪" : "等待安装");
+        ready ? "已初始化 · ARM64" : manager.initialized() ? "已解压 · 待检查／补装" : "未初始化");
+    infoRow(states, R.drawable.ic_terminal, "共享组件", ready ? "Python · Node · npm · Git · TLS · curl · xz" : "初始化时按需下载安装");
+    introText("初始化与修复通过国内镜像按需下载安装依赖，下载失败时尝试备用镜像。环境检查逐项验证工具运行、软件包状态和网络，并保留具体失败项。");
     Ui.rowItem(states, R.drawable.ic_spark, "Agent 运行时", installedCount() + " / 3 已安装", () -> show("agents"));
 
     NativeUi.section(this, body, "维护");
@@ -261,7 +262,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
 
     NativeUi.section(this, body, "维护");
     LinearLayout maintenance = Ui.group(body);
-    Ui.rowItem(maintenance, R.drawable.ic_cloud, "检查全部 Agent 更新", "读取官方发布源，逐个查看新版本",
+    Ui.rowItem(maintenance, R.drawable.ic_cloud, "检查全部 Agent 更新", "通过国内镜像查询发布版本，逐个查看新版本",
         () -> show("updates"));
     Ui.rowItem(maintenance, R.drawable.ic_check, "检查 Agent 接口", "版本、模型与工具连接",
         () -> show("interfaces"));
@@ -920,7 +921,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
 
   private void updatesPage() {
     final int generation = pageGeneration;
-    introText("从官方发布源读取最新版本。检查不会安装或修改文件，确认后再更新。");
+    introText("通过国内镜像查询最新发布版本。检查不会安装或修改文件，确认后再更新。");
     NativeUi.section(this, body, "Agent");
     final LinearLayout list = Ui.col(this);
     body.addView(list);
@@ -1329,7 +1330,7 @@ public final class RuntimeActivity extends androidx.appcompat.app.AppCompatActiv
   private void update() {
     try {
       String state = (manager.complete() ? "环境已就绪"
-              : manager.initialized() ? "基础系统已就绪 · 待补装组件" : "运行环境未初始化")
+              : manager.initialized() ? "基础系统已解压 · 待检查／补装" : "运行环境未初始化")
           + " · " + installedCount() + " / 3 Agent";
       if (busy() || pendingOperation != null) state += " · 操作进行中";
       File status = new File(getFilesDir(), "runtime-operation.json");

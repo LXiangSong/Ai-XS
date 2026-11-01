@@ -18,12 +18,17 @@ class AssetTests(unittest.TestCase):
             self.assertIn('native_host.py',names)
             self.assertIn('agent_core.py',names)
             self.assertIn('provider_manager.py',names)
+            self.assertIn('dsh_live_events.mjs',names)
+            sys.path.insert(0, str(ROOT/'android/tools'))
+            from project_metadata import version
+            self.assertEqual(json.loads(archive.read('version.json')), version())
             self.assertTrue(all('/' not in name and not name.startswith('.') for name in names))
             self.assertNotIn('providers.json',names)
             self.assertFalse(any(name.endswith(('.html','.css','.js')) for name in names))
             self.assertNotIn(b'ThreadingHTTPServer',archive.read('agent_core.py'))
             self.assertNotIn(b'BaseHTTPRequestHandler',archive.read('agent_core.py'))
         self.assertFalse((ROOT/'android/app/src/main/assets/runtime/web.zip').exists())
+
 
 
 if __name__=='__main__':unittest.main()

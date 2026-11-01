@@ -6,7 +6,10 @@ import time
 class TaskScheduler:
     def __init__(self, settings, external, enabled):
         self.settings,self.external,self.enabled=settings,external,enabled
-        self.lock=threading.RLock();self.leases={};self.sample=None;self.closed=False
+        self.lock=threading.RLock();self.leases={};self.sample=None;self.closed=False;self.backoffs={}
+
+    def backoff(self, group, until):
+        with self.lock:self.backoffs[group]=max(self.backoffs.get(group,0),until)
 
     def resources(self, value):
         with self.lock:
@@ -23,6 +26,7 @@ class TaskScheduler:
         if sample is None or time.monotonic()-sample['receivedAt']>20:return '等待手机资源信息'
         if sample.get('lowMemory') or sample.get('available',0)<1024*1024*1024:return '可用内存不足，暂停派发'
         if sample.get('thermal',0)>=4:return '设备过热，暂停派发'
+        if group and self.backoffs.get(group,0)>time.time():return 'API 来源退避中，等待 '+str(max(1,int(self.backoffs[group]-time.time())))+' 秒'
         if group and sum(lease.get('group')==group for lease in self.leases.values())>=self.settings().get('sourceParallel',2):return '等待 API 来源并发名额'
         for owner,lease in self.leases.items():
             if owner==key:continue

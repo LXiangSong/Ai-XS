@@ -1,6 +1,7 @@
 package app.aixs.mobile;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.view.*;
@@ -148,8 +149,8 @@ final class NativeUi {
   static void section(Activity a, LinearLayout body, String label) {
     TextView t = Ui.sectionLabel(a, label);
     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-    lp.topMargin = dp(a, 10);
-    lp.bottomMargin = dp(a, 8);
+    lp.topMargin = dp(a, 12);
+    lp.bottomMargin = dp(a, 10);
     lp.leftMargin = dp(a, 4);
     body.addView(t, lp);
   }
@@ -254,7 +255,8 @@ final class NativeUi {
     if (!a.isFinishing())
       new MaterialAlertDialogBuilder(a)
           .setTitle("操作未完成")
-          .setMessage(Diagnostics.redact(a, message))
+          .setMessage(ErrorMessage.friendly(Diagnostics.redact(a, message)))
+          .setNegativeButton("查看日志", (d, w) -> a.startActivity(new Intent(a, RuntimeActivity.class).putExtra("page", "logs")))
           .setPositiveButton("知道了", null)
           .show();
   }

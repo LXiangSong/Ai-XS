@@ -30,6 +30,60 @@ def model_endpoint(status=200, body=None):
 
 
 class ProviderProfileTests(unittest.TestCase):
+    def test_deepseek_image_capability_matches_runtime_and_model_list(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);manager=ProviderManager(folder,home=folder,ubuntu_home=folder)
+            for mode,protocol in [('official','anthropic-messages'),('thirdparty','anthropic-messages'),
+                                  ('thirdparty','openai-completions'),('thirdparty','responses')]:
+                with self.subTest(mode=mode,protocol=protocol):
+                    manager.save('deepseek',{'mode':mode,'name':'Gateway','baseUrl':'https://gateway.invalid/v1',
+                        'protocol':protocol,'models':['deepseek-flash','deepseek-v4-pro','unknown/model'],'key':'private-test'})
+                    patch=json.loads((folder/'deepseek-provider.yml').read_text())
+                    config=next(p['config'] for p in patch if p['id']==('llm-deepseek' if mode=='official' else 'llm-pi-ai'))
+                    models=config['models'] if mode=='official' else config['providers']['ai-xs']['models']
+                    field='inputModalities' if mode=='official' else 'input'
+                    native={m['id']:m[field] for m in models}
+                    public={m['model']:m['inputModalities'] for m in manager.model_list('deepseek',{})['data']}
+                    self.assertEqual(native,public)
+                    self.assertEqual(native['deepseek-flash'],['text','image'])
+                    self.assertEqual(native['deepseek-v4-pro'],['text'])
+                    self.assertEqual(native['unknown/model'],['text'])
+
+    def test_thirdparty_image_metadata_survives_restart_and_can_disable_known_vision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);manager=ProviderManager(folder,home=folder,ubuntu_home=folder)
+            profile={'mode':'thirdparty','name':'Gateway','baseUrl':'https://gateway.invalid/v1',
+                'protocol':'openai-completions','models':['custom/vision','deepseek-flash'],'key':'private-test',
+                'modelCapabilities':{'custom/vision':{'inputModalities':['text','image']},'deepseek-flash':{'inputModalities':['text']}}}
+            manager.save('deepseek',profile)
+            restored=ProviderManager(folder,home=folder,ubuntu_home=folder)
+            self.assertEqual(restored.read('deepseek')['profiles']['thirdparty']['modelCapabilities'],profile['modelCapabilities'])
+            native=json.loads((folder/'deepseek-provider.yml').read_text())[0]['config']['providers']['ai-xs']['models']
+            self.assertEqual(native[0]['input'],['text','image']);self.assertEqual(native[1]['input'],['text'])
+            restored.save('deepseek',{k:v for k,v in profile.items() if k!='modelCapabilities'})
+            self.assertEqual(restored.selected('deepseek')['modelCapabilities'],profile['modelCapabilities'])
+            changed={k:v for k,v in profile.items() if k!='modelCapabilities'};changed['baseUrl']='https://other.invalid/v1'
+            restored.save('deepseek',changed)
+            self.assertEqual(restored.selected('deepseek')['modelCapabilities'],{})
+
+    def test_discovery_preserves_only_explicit_input_modalities(self):
+        with model_endpoint(body={'data':[{'id':'custom/vision','input_modalities':['text','image']},
+                                          {'id':'custom/text','inputModalities':['text']},{'id':'unknown'}]}) as (base,_):
+            result=self.discover_at(base)
+            self.assertEqual(result['modelCapabilities'],{'custom/vision':{'inputModalities':['text','image']},
+                                                         'custom/text':{'inputModalities':['text']}})
+
+    def test_invalid_image_metadata_does_not_change_saved_provider(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);manager=ProviderManager(folder,home=folder,ubuntu_home=folder)
+            original=manager.document()
+            for capabilities in ([],{'custom':{'inputModalities':['video']}},{'custom':{'inputModalities':['text','text']}},
+                                 {'other':{'inputModalities':['text','image']}}):
+                with self.assertRaises(ValueError):
+                    manager.save('deepseek',{'mode':'thirdparty','name':'Gateway','baseUrl':'https://gateway.invalid/v1',
+                        'protocol':'openai-completions','models':['custom'],'key':'private-test','modelCapabilities':capabilities})
+                self.assertEqual(manager.document(),original)
+
     def test_claude_gateway_version_prefix_is_not_duplicated_or_applied_to_other_agents(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder=Path(temporary);manager=ProviderManager(folder,home=folder,ubuntu_home=folder)
